@@ -1,0 +1,8 @@
+# 凌恒的酒馆 依赖
+# 安装： python -m pip install -r requirements.txt
+#
+# 版本下限说明：
+#   streamlit >= 1.49 才能使用 st.button(width=...) 与 st.logo(size=...)
+#   openai    >= 1.40 才支持 reasoning_effort 参数与 chat.completions 流式接口
+streamlit>=1.49,<2
+openai>=1.40

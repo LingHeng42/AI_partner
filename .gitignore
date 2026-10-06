@@ -1,0 +1,16 @@
+# 虚拟环境 / 编辑器
+.venv/
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+
+# 本地密钥
+.env
+
+# 用户对话存档（属于个人数据，不入库）
+sessions/*.json
+sessions/*.json.tmp
+
+# 测试运行时的临时文件
+tests/.tmp/
