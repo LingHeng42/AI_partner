@@ -58,11 +58,11 @@ requirements.txt     依赖清单
 ```json
 {
   "message": [{"role": "user", "content": "你好"}],
-  "nike_name": "溟月",
+  "nickname": "溟月",
   "nature": "聪明但很懒，傲娇嘴甜，酷爱白米饭",
   "role_description": "溟月是一位拥有蓝色长发和蓝色眼睛的少女……",
   "output_rules": "请以第一人称的口吻回答问题……"
 }
 ```
 
-> 旧的 `nike_name` 字段拼写会在读取时自动兼容，无需手动迁移。
+> 四个字段名与 `AI_partner.py` 里的 `DEFAULT_PROFILE` 一一对应；字段缺失时按默认值回填。昵称字段名为 `nickname`（历史版本里的拼写错误 `nike_name` 已废弃）。

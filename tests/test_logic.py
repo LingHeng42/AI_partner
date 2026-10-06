@@ -206,15 +206,16 @@ check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
 check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 app.st.session_state["message"] = []
-app.st.session_state["nike_name"] = "被覆盖"
+app.st.session_state["nickname"] = "被覆盖"
 app.load_selected_session("2026-01-01_120000_000")
 check("读取会话恢复消息", app.st.session_state["message"] == [{"role": "user", "content": "你好"}])
-check("读取会话恢复人设", app.st.session_state["nike_name"] == app.DEFAULT_PROFILE["nike_name"])
+check("读取会话恢复人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
 
-legacy = tmp / "2000-01-01_000000_000.json"
-legacy.write_text(json.dumps({"message": [], "nike_name": "旧昵称"}, ensure_ascii=False), encoding="utf-8")
+# 只写了部分字段的存档：缺失项应回填默认值
+partial = tmp / "2000-01-01_000000_000.json"
+partial.write_text(json.dumps({"message": [], "nickname": "旧昵称"}, ensure_ascii=False), encoding="utf-8")
 app.load_selected_session("2000-01-01_000000_000")
-check("兼容旧存档 nike_name 字段", app.st.session_state["nike_name"] == "旧昵称", app.st.session_state["nike_name"])
+check("部分字段的存档能读出昵称", app.st.session_state["nickname"] == "旧昵称", app.st.session_state["nickname"])
 check("缺失的人设字段回填默认值", app.st.session_state["nature"] == app.DEFAULT_PROFILE["nature"])
 check("多会话按时间倒序", app.load_session_list() == ["2026-01-01_120000_000", "2000-01-01_000000_000"], app.load_session_list())
 
@@ -242,7 +243,7 @@ app.st.session_state.update(app.DEFAULT_PROFILE)
 app.st.session_state["message"] = [{"role": "user", "content": "hi"}]
 built = app.build_messages()
 check("build_messages 首位是 system", built[0]["role"] == "system")
-check("system prompt 注入昵称", app.DEFAULT_PROFILE["nike_name"] in built[0]["content"], built[0]["content"][:30])
+check("system prompt 注入昵称", app.DEFAULT_PROFILE["nickname"] in built[0]["content"], built[0]["content"][:30])
 check("system prompt 含性格", app.DEFAULT_PROFILE["nature"] in built[0]["content"])
 check("system prompt 含角色简介", app.DEFAULT_PROFILE["role_description"] in built[0]["content"])
 check("历史消息跟随 system 之后", built[1:] == [{"role": "user", "content": "hi"}])
@@ -256,12 +257,12 @@ app.delete_session("2026-01-01_120000_000")
 check("删除后文件消失", not saved.exists())
 check("删除当前会话后换新 ID", app.st.session_state["current_session"] != "2026-01-01_120000_000")
 check("删除当前会话后清空消息", app.st.session_state["message"] == [])
-check("删除当前会话后重置人设", app.st.session_state["nike_name"] == app.DEFAULT_PROFILE["nike_name"])
+check("删除当前会话后重置人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
 
 app.st.session_state["current_session"] = "keep-me"
 app.delete_session("2000-01-01_000000_000")
 check("删除非当前会话不影响当前会话", app.st.session_state["current_session"] == "keep-me")
-check("删除非当前会话清掉文件", not legacy.exists())
+check("删除非当前会话清掉文件", not partial.exists())
 
 # --------------------------------------------------------------------------- #
 # 对话流程 render_reply（真实执行流式渲染、异常处理与落盘）
@@ -356,7 +357,8 @@ for key in ("nature", "output_rules"):
 # role_description 在源码里是跨行隐式拼接的，按片段校验唯一性
 for fragment in app.DEFAULT_PROFILE["role_description"].split("，"):
     check(f"role_description 片段只出现一次 {fragment[:12]}", src.count(fragment) == 1, src.count(fragment))
-check("保留旧字段迁移映射", "LEGACY_KEY_MAP" in src)
+check("昵称字段已统一为 nickname", "nickname" in src and "nike_name" not in src)
+check("不再保留旧的迁移映射", "LEGACY_KEY_MAP" not in src)
 check("使用 Path 解析脚本目录", "Path(__file__).resolve().parent" in src)
 check("os.replace 原子落盘", "os.replace" in src)
 

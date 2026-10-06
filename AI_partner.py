@@ -27,7 +27,7 @@ LOGO_PATH = RESOURCES_DIR / "logo.png"
 # 默认人设：只在这里定义一次，初始化 / 加载 / 删除会话统一复用
 # --------------------------------------------------------------------------- #
 DEFAULT_PROFILE = {
-    "nike_name": "溟月",
+    "nickname": "溟月",
     "nature": "聪明但很懒，傲娇嘴甜，酷爱白米饭",
     "role_description": (
         "溟月是一位拥有蓝色长发和蓝色眼睛的少女，身穿深蓝白色长裙女仆装，"
@@ -36,10 +36,8 @@ DEFAULT_PROFILE = {
     "output_rules": "请以第一人称的口吻回答问题，尽量简短，避免使用过于复杂的词汇和句子结构。",
 }
 PROFILE_KEYS = tuple(DEFAULT_PROFILE)
-# 旧存档把昵称字段写成了 nike_name，读取时做一次兼容
-LEGACY_KEY_MAP = {"nike_name": "nike_name"}
 
-SYSTEM_PROMPT = """你叫{nike_name}，
+SYSTEM_PROMPT = """你叫{nickname}，
 性格：{nature}。
 角色简介：{role_description}。
 按照你{output_rules}的输出规则回答用户的问题，请完全代入角色，遵循性格和角色简介。"""
@@ -130,10 +128,7 @@ def load_selected_session(session_name: str) -> None:
             session_data = json.load(f)
         st.session_state.message = session_data.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
-            value = session_data.get(key)
-            if not value and key in LEGACY_KEY_MAP:
-                value = session_data.get(LEGACY_KEY_MAP[key])
-            st.session_state[key] = value or default
+            st.session_state[key] = session_data.get(key) or default
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
@@ -319,9 +314,9 @@ with st.sidebar:
 
     # 角色管理（先落盘到 session_state，再作为控件默认值回填）
     st.subheader("管理角色")
-    nike_name = st.text_input("昵称", value=st.session_state.nike_name, placeholder="请输入昵称")
-    if nike_name:
-        st.session_state.nike_name = nike_name
+    nickname = st.text_input("昵称", value=st.session_state.nickname, placeholder="请输入昵称")
+    if nickname:
+        st.session_state.nickname = nickname
     nature = st.text_area("性格", value=st.session_state.nature, placeholder="请输入性格描述")
     if nature:
         st.session_state.nature = nature
