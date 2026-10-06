@@ -82,13 +82,28 @@ load_dotenv_file()
 # --------------------------------------------------------------------------- #
 # 会话存档
 # --------------------------------------------------------------------------- #
+DEFAULT_SESSION_TITLE = "新会话"
+
+
 def new_session_id() -> str:
-    """生成会话 ID：精确到毫秒，避免同一秒内连续新建会话互相覆盖。"""
+    """生成会话 ID（= 存档文件名）：精确到毫秒，避免同一秒内连续新建会话互相覆盖。"""
     return datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S_%f")[:-3]
 
 
 def profile_from_state() -> dict:
     return {key: st.session_state[key] for key in PROFILE_KEYS}
+
+
+def session_title(session_name: str) -> str:
+    """读某个存档的自定义会话名称；没设置过就回退成会话 ID（时间戳）。"""
+    try:
+        path = _safe_session_path(session_name)
+        if not path.exists():
+            return session_name
+        with path.open("r", encoding="utf-8") as f:
+            return (json.load(f).get("title") or "").strip() or session_name
+    except Exception:  # noqa: BLE001 - 名称读不出来不该影响整个侧边栏
+        return session_name
 
 
 def reset_profile() -> None:
@@ -99,10 +114,14 @@ def reset_profile() -> None:
 
 
 def save_session() -> None:
-    """把当前会话原子写入 sessions/<id>.json，写一半崩溃也不会损坏旧存档。"""
+    """把当前会话原子写入 sessions/<会话ID>.json，写一半崩溃也不会损坏旧存档。"""
     if not st.session_state.get("current_session"):
         return
-    session_data = {"message": st.session_state.message, **profile_from_state()}
+    session_data = {
+        "title": st.session_state.get("session_title", ""),
+        "message": st.session_state.message,
+        **profile_from_state(),
+    }
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     target = SESSIONS_DIR / f"{st.session_state.current_session}.json"
     tmp = target.with_suffix(".json.tmp")
@@ -143,6 +162,8 @@ def load_selected_session(session_name: str) -> None:
         st.session_state.message = session_data.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
             st.session_state[key] = session_data.get(key) or default
+        # 会话名称存在存档里；老存档没这个字段就回退成会话 ID
+        st.session_state.session_title = (session_data.get("title") or "").strip() or session_name
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
@@ -158,6 +179,7 @@ def delete_session(session_name: str) -> None:
         if session_name == st.session_state.current_session:
             reset_profile()
             st.session_state.current_session = new_session_id()
+            st.session_state.session_title = DEFAULT_SESSION_TITLE
     except Exception as e:  # noqa: BLE001
         st.error(f"删除会话失败: {e}")
         return
@@ -357,14 +379,12 @@ for _key, _value in DEFAULT_ADVANCED.items():
     st.session_state.setdefault(_key, _value)
 st.session_state.setdefault("message", [])
 st.session_state.setdefault("thinking", False)
+st.session_state.setdefault("session_title", DEFAULT_SESSION_TITLE)
 if "current_session" not in st.session_state:
     st.session_state.current_session = new_session_id()
 
 # 每次脚本运行都校验 Key（函数本身不缓存），缓存只作用在客户端构造上
 client = get_client(require_api_key())
-
-# 标题
-st.header("凌恒的酒馆")
 
 # logo（文件缺失时不影响页面）
 if LOGO_PATH.exists():
@@ -373,9 +393,6 @@ if LOGO_PATH.exists():
     except Exception:  # noqa: BLE001 - 老版本 streamlit 没有 st.logo
         pass
 
-# 当前会话标识（原来的 st.text 调试残留，改为弱化的说明文字）
-st.caption(f"当前会话：{st.session_state.current_session}")
-
 # 展示历史对话（开启过深度思考的回答会带上可折叠的思考过程）
 render_history()
 
@@ -383,13 +400,34 @@ render_history()
 # 侧边栏
 # --------------------------------------------------------------------------- #
 with st.sidebar:
-    st.title("AI管理面板")
+    # 标题：小号字放在 logo 右侧
+    logo_col, title_col = st.columns([1, 6], vertical_alignment="center")
+    with logo_col:
+        if LOGO_PATH.exists():
+            try:
+                st.image(str(LOGO_PATH), width=64)
+            except Exception:  # noqa: BLE001 - 图片渲染失败不影响功能
+                pass
+    with title_col:
+        st.markdown("### 凌恒的酒馆")
+        st.caption("AI 角色扮演聊天")
+
+    st.divider()
+
+    # 会话名称：与存档文件名（会话 ID）解耦，改名不会新建/移动文件
+    st.text_input(
+        "会话名称",
+        key="session_title",
+        placeholder=DEFAULT_SESSION_TITLE,
+        help="只影响显示，不会改变存档文件名（文件名始终是会话 ID 时间戳）。",
+    )
 
     # 新建会话
     if st.button("新建会话", width="stretch", icon="📝"):
         save_session()
         reset_profile()
         st.session_state.current_session = new_session_id()
+        st.session_state.session_title = DEFAULT_SESSION_TITLE
         save_session()
         st.rerun()  # 刷新页面
 
@@ -398,20 +436,22 @@ with st.sidebar:
     if not session_list:
         st.caption("还没有保存的会话。")
     for index, session in enumerate(session_list):
+        label = session_title(session)
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                session,
+                label,
                 width="stretch",
                 icon="📄",
                 key=f"session_{index}_{session}",
+                help=session,
                 type="primary" if session == st.session_state.current_session else "secondary",
                 on_click=lambda s=session: load_selected_session(s),
             )
         with col2:
             # 删除前二次确认，避免误删存档
             with st.popover("❌", width="stretch"):
-                st.caption(f"确认删除会话\n\n`{session}` ？")
+                st.caption(f"确认删除会话\n\n`{label}` ？")
                 if st.button("确认删除", key=f"confirm_delete_{index}_{session}", width="stretch", type="primary"):
                     delete_session(session)
     st.divider()

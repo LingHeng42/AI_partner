@@ -105,9 +105,13 @@ import _fake_openai  # noqa: E402  脚本执行时已导入，这里拿到同一
 
 check("假客户端已注入", isinstance(_fake_openai.STATE, dict), type(_fake_openai.STATE).__name__)
 check("页面无异常启动", not at.exception, str(at.exception))
-check("标题渲染成功", any("凌恒的酒馆" in h.value for h in at.header), [h.value for h in at.header])
+check("标题不再占据主区域", not any("凌恒的酒馆" in h.value for h in at.header), [h.value for h in at.header])
+check("标题移到侧边栏（markdown 渲染）", any("凌恒的酒馆" in (m.value or "") for m in at.markdown),
+      [m.value for m in at.markdown][:3])
 check("聊天输入框存在", len(at.chat_input) == 1)
-check("昵称输入框存在", [t.label for t in at.text_input] == ["昵称"], [t.label for t in at.text_input])
+check("会话名称输入框存在", "会话名称" in [t.label for t in at.text_input], [t.label for t in at.text_input])
+check("会话名称默认值", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
+check("昵称输入框存在", "昵称" in [t.label for t in at.text_input], [t.label for t in at.text_input])
 check("昵称字段名为 nickname", at.session_state["nickname"] == "溟月", at.session_state["nickname"])
 check("侧边栏三个多行输入框齐全", [t.label for t in at.text_area] == ["性格", "角色简介", "输出规则"], [t.label for t in at.text_area])
 check("侧边栏有深度思考开关", [t.label for t in at.toggle] == ["深度思考"], [t.label for t in at.toggle])
@@ -118,7 +122,7 @@ check("高级配置默认折叠", advanced and advanced[0].proto.expanded is Fal
 check("会话历史分区存在", any(s.value == "会话历史" for s in at.subheader), [s.value for s in at.subheader])
 check("管理角色分区存在", any(s.value == "管理角色" for s in at.subheader), [s.value for s in at.subheader])
 check("生成参数分区存在", any(s.value == "生成参数" for s in at.subheader), [s.value for s in at.subheader])
-check("当前会话以 caption 展示", any("当前会话：" in c.value for c in at.caption), [c.value for c in at.caption][:2])
+check("主区域不再显示会话 ID", not any("当前会话：" in c.value for c in at.caption), [c.value for c in at.caption][:3])
 check("启动阶段未发起任何模型请求", _fake_openai.STATE["calls"] == [])
 
 # --------------------------------------------------------------------------- #

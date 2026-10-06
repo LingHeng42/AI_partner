@@ -247,28 +247,45 @@ app.st.session_state.update(app.DEFAULT_ADVANCED)
 app.st.session_state["thinking"] = False
 app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
+app.st.session_state["session_title"] = "第一次聊天"
 
 app.save_session()
 saved = tmp / "2026-01-01_120000_000.json"
 check("会话存档写入成功", saved.exists())
 data = json.loads(saved.read_text(encoding="utf-8"))
-check("存档字段 = 四大人设 + message", set(data) == set(app.PROFILE_KEYS) | {"message"}, sorted(data))
+check("存档字段 = 会话名称 + 四大人设 + message", set(data) == set(app.PROFILE_KEYS) | {"message", "title"}, sorted(data))
+check("存档文件名始终是会话 ID", saved.name == "2026-01-01_120000_000.json", saved.name)
 check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
 check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
+# 自定义名称：显示用名称与文件名解耦
+check("会话名称被写入存档", data["title"] == "第一次聊天", data.get("title"))
+check("读回自定义会话名称", app.session_title("2026-01-01_120000_000") == "第一次聊天")
+
 app.st.session_state["message"] = []
 app.st.session_state["nickname"] = "被覆盖"
+app.st.session_state["session_title"] = "被覆盖"
 app.load_selected_session("2026-01-01_120000_000")
 check("读取会话恢复消息", app.st.session_state["message"] == [{"role": "user", "content": "你好"}])
 check("读取会话恢复人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
+check("读取会话恢复名称", app.st.session_state["session_title"] == "第一次聊天", app.st.session_state["session_title"])
 
-# 只写了部分字段的存档：缺失项应回填默认值
+# 只写了部分字段的存档：缺失项应回填默认值，名称回退成会话 ID
 partial = tmp / "2000-01-01_000000_000.json"
 partial.write_text(json.dumps({"message": [], "nickname": "旧昵称"}, ensure_ascii=False), encoding="utf-8")
 app.load_selected_session("2000-01-01_000000_000")
 check("部分字段的存档能读出昵称", app.st.session_state["nickname"] == "旧昵称", app.st.session_state["nickname"])
 check("缺失的人设字段回填默认值", app.st.session_state["nature"] == app.DEFAULT_PROFILE["nature"])
-check("多会话按时间倒序", app.load_session_list() == ["2026-01-01_120000_000", "2000-01-01_000000_000"], app.load_session_list())
+check("没有 title 的老存档回退成会话 ID", app.session_title("2000-01-01_000000_000") == "2000-01-01_000000_000",
+      app.session_title("2000-01-01_000000_000"))
+blank_title = tmp / "3000-01-01_000000_000.json"
+blank_title.write_text(json.dumps({"title": "  "}), encoding="utf-8")
+check("空 title 也回退成会话 ID", app.session_title("3000-01-01_000000_000") == "3000-01-01_000000_000",
+      app.session_title("3000-01-01_000000_000"))
+check("不存在的会话名回退成自身", app.session_title("no-such-session") == "no-such-session")
+check("多会话按时间倒序", app.load_session_list() == ["3000-01-01_000000_000", "2026-01-01_120000_000", "2000-01-01_000000_000"],
+      app.load_session_list())
+blank_title.unlink()
 
 check("合法会话名可解析", app._safe_session_path("2026-01-01_120000_000").name == "2026-01-01_120000_000.json")
 for bad in ("../../evil", "a/b", "", "..\\evil"):
@@ -304,15 +321,20 @@ check("system prompt 无残留缩进", "\n                " not in built[0]["con
 # 删除会话
 # --------------------------------------------------------------------------- #
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
+app.st.session_state["session_title"] = "第一次聊天"
 app.delete_session("2026-01-01_120000_000")
 check("删除后文件消失", not saved.exists())
 check("删除当前会话后换新 ID", app.st.session_state["current_session"] != "2026-01-01_120000_000")
 check("删除当前会话后清空消息", app.st.session_state["message"] == [])
 check("删除当前会话后重置人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
+check("删除当前会话后重置名称", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE,
+      app.st.session_state["session_title"])
 
 app.st.session_state["current_session"] = "keep-me"
+app.st.session_state["session_title"] = "保留的名字"
 app.delete_session("2000-01-01_000000_000")
 check("删除非当前会话不影响当前会话", app.st.session_state["current_session"] == "keep-me")
+check("删除非当前会话不影响当前名称", app.st.session_state["session_title"] == "保留的名字")
 check("删除非当前会话清掉文件", not partial.exists())
 
 # --------------------------------------------------------------------------- #
