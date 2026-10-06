@@ -126,7 +126,21 @@ check("主区域不再显示会话 ID", not any("当前会话：" in c.value for
 check("启动阶段未发起任何模型请求", _fake_openai.STATE["calls"] == [])
 
 # --------------------------------------------------------------------------- #
-# B. 缺少 API Key 时给出可读提示，而不是 SDK 堆栈
+# B. 点击「新建会话」：回调里改 session_title 不能触发
+#    StreamlitWidgetAlreadyInstantiatedError（会话名称输入框已先实例化）
+# --------------------------------------------------------------------------- #
+new_button = next((b for b in at.button if b.label == "新建会话"), None)
+check("找到新建会话按钮", new_button is not None)
+if new_button is not None:
+    before = at.session_state["current_session"]
+    new_button.click().run()  # 回调在控件实例化之前执行，这里正是原报错的路径
+    check("点击新建会话不抛异常", not at.exception, [e.message for e in at.exception] or "")
+    check("新建会话后换新 ID", at.session_state["current_session"] != before, at.session_state["current_session"])
+    check("新建会话后名称回到默认", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
+    check("新建会话后对话清空", at.session_state["message"] == [], at.session_state["message"])
+
+# --------------------------------------------------------------------------- #
+# C. 缺少 API Key 时给出可读提示，而不是 SDK 堆栈
 #    该分支在 tests/test_logic.py 里通过 require_api_key() 直接断言，
 #    这里只确认页面不会以异常形式炸掉。
 # --------------------------------------------------------------------------- #

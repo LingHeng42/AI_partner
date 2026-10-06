@@ -171,6 +171,20 @@ def load_selected_session(session_name: str) -> None:
     st.rerun()  # 刷新页面
 
 
+def new_session() -> None:
+    """新建会话：先把当前会话落盘，再清空人设与对话、换新 ID 和默认名称。
+
+    必须作为按钮的 on_click 回调执行：回调在控件实例化之前运行，
+    否则修改 st.session_state['session_title']（已被输入框占用）会报
+    StreamlitWidgetAlreadyInstantiatedError。
+    """
+    save_session()
+    reset_profile()
+    st.session_state.current_session = new_session_id()
+    st.session_state.session_title = DEFAULT_SESSION_TITLE
+    save_session()
+
+
 def delete_session(session_name: str) -> None:
     try:
         path = _safe_session_path(session_name)
@@ -240,6 +254,16 @@ def build_messages() -> list:
 
 def advanced_value(name: str):
     return st.session_state.get(name, DEFAULT_ADVANCED[name])
+
+
+def reset_advanced() -> None:
+    """恢复高级配置默认值。
+
+    必须作为 on_click 回调执行：这些键已被滑块/复选框控件占用，
+    在控件实例化之后再赋值会报 StreamlitWidgetAlreadyInstantiatedError。
+    """
+    for key, value in DEFAULT_ADVANCED.items():
+        st.session_state[key] = value
 
 
 def build_request_payload() -> dict:
@@ -415,21 +439,17 @@ with st.sidebar:
     st.divider()
 
     # 会话名称：与存档文件名（会话 ID）解耦，改名不会新建/移动文件
+    # 注意：控件 key 直接占用 "session_title"，所以只能在回调里改这个键
     st.text_input(
         "会话名称",
+        value=st.session_state.session_title,
         key="session_title",
         placeholder=DEFAULT_SESSION_TITLE,
         help="只影响显示，不会改变存档文件名（文件名始终是会话 ID 时间戳）。",
     )
 
-    # 新建会话
-    if st.button("新建会话", width="stretch", icon="📝"):
-        save_session()
-        reset_profile()
-        st.session_state.current_session = new_session_id()
-        st.session_state.session_title = DEFAULT_SESSION_TITLE
-        save_session()
-        st.rerun()  # 刷新页面
+    # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）
+    st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
 
     st.subheader("会话历史")
     session_list = load_session_list()
@@ -449,27 +469,25 @@ with st.sidebar:
                 on_click=lambda s=session: load_selected_session(s),
             )
         with col2:
-            # 删除前二次确认，避免误删存档
+            # 删除前二次确认，避免误删存档（删除同样走回调）
             with st.popover("❌", width="stretch"):
                 st.caption(f"确认删除会话\n\n`{label}` ？")
-                if st.button("确认删除", key=f"confirm_delete_{index}_{session}", width="stretch", type="primary"):
-                    delete_session(session)
+                st.button(
+                    "确认删除",
+                    key=f"confirm_delete_{index}_{session}",
+                    width="stretch",
+                    type="primary",
+                    on_click=lambda s=session: delete_session(s),
+                )
     st.divider()
 
-    # 角色管理（先落盘到 session_state，再作为控件默认值回填）
+    # 角色管理：控件 key 直接就是状态键，不需要手工回写（回写会在控件实例化后
+    # 修改同名 session_state，触发 StreamlitWidgetAlreadyInstantiatedError）
     st.subheader("管理角色")
-    nickname = st.text_input("昵称", value=st.session_state.nickname, placeholder="请输入昵称")
-    if nickname:
-        st.session_state.nickname = nickname
-    nature = st.text_area("性格", value=st.session_state.nature, placeholder="请输入性格描述")
-    if nature:
-        st.session_state.nature = nature
-    role_description = st.text_area("角色简介", value=st.session_state.role_description, placeholder="请输入角色简介")
-    if role_description:
-        st.session_state.role_description = role_description
-    output_rules = st.text_area("输出规则", value=st.session_state.output_rules, placeholder="请输入输出规则")
-    if output_rules:
-        st.session_state.output_rules = output_rules
+    st.text_input("昵称", key="nickname", placeholder="请输入昵称")
+    st.text_area("性格", key="nature", placeholder="请输入性格描述")
+    st.text_area("角色简介", key="role_description", placeholder="请输入角色简介")
+    st.text_area("输出规则", key="output_rules", placeholder="请输入输出规则")
 
     st.divider()
 
@@ -525,10 +543,7 @@ with st.sidebar:
                 key="max_tokens",
                 help="单次回答（不含思考过程）的长度上限。",
             )
-        if st.button("恢复默认值", width="stretch"):
-            for _key, _value in DEFAULT_ADVANCED.items():
-                st.session_state[_key] = _value
-            st.rerun()
+        st.button("恢复默认值", width="stretch", on_click=reset_advanced)
 
 
 # --------------------------------------------------------------------------- #

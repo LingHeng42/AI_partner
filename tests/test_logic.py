@@ -507,6 +507,31 @@ app.render_reply(_Sink())
 check("高级参数真正传给了模型调用", app.client.chat.completions.calls[-1]["temperature"] == 0.5)
 
 # --------------------------------------------------------------------------- #
+# 带会话名称的新建 / 重置回调（这些函数只在 on_click 里跑，不能改已实例化的控件键）
+# --------------------------------------------------------------------------- #
+app.st.session_state = _State()
+app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["message"] = [{"role": "user", "content": "旧对话"}]
+app.st.session_state["current_session"] = "2026-01-01_120000_000"
+app.st.session_state["session_title"] = "旧名字"
+app.new_session()
+check("新建会话后换新 ID", app.st.session_state["current_session"] != "2026-01-01_120000_000")
+check("新建会话后名称回到默认", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE)
+check("新建会话后对话清空", app.st.session_state["message"] == [])
+check("新建会话后旧档已落盘", (tmp / "2026-01-01_120000_000.json").exists())
+check("新会话也立刻落盘", (tmp / f"{app.st.session_state['current_session']}.json").exists())
+check("新会话存档名称是默认值",
+      json.loads((tmp / f"{app.st.session_state['current_session']}.json").read_text(encoding="utf-8"))["title"]
+      == app.DEFAULT_SESSION_TITLE)
+
+app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
+                             "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})
+app.reset_advanced()
+for _key, _value in app.DEFAULT_ADVANCED.items():
+    check(f"恢复默认值 {_key}", app.st.session_state[_key] == _value, app.st.session_state[_key])
+
+# --------------------------------------------------------------------------- #
 # 会话 ID 与源码层面的重复度
 # --------------------------------------------------------------------------- #
 ids = {app.new_session_id() for _ in range(300)}
