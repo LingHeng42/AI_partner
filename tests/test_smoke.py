@@ -10,23 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent.parent
-TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"run_{os.getpid()}"
-TMP_DIR.mkdir(parents=True, exist_ok=True)
-
-# 把字节码缓存也限制在本次运行的目录里，避免复用上一次运行留下的 .pyc
-sys.dont_write_bytecode = True
-
-# 临时文件留在仓库内，避免写到系统临时目录
-os.environ["TMPDIR"] = str(TMP_DIR)
-os.environ["TEMP"] = str(TMP_DIR)
-os.environ["TMP"] = str(TMP_DIR)
-# 关键：把应用的存档目录隔离到临时目录，测试绝不读写真实 sessions/
-FAKE_SESSIONS = TMP_DIR / "sessions"
-FAKE_SESSIONS.mkdir(parents=True, exist_ok=True)
-os.environ["AI_PARTNER_SESSIONS_DIR"] = str(FAKE_SESSIONS)
-sys.path.insert(0, str(PROJECT))
-sys.path.insert(0, str(TMP_DIR))
+from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: F401
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 

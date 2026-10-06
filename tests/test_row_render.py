@@ -9,25 +9,9 @@
     .venv\\Scripts\\python.exe tests\\test_row_render.py
 """
 import json
-import os
 import sys
-from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent.parent
-TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"row_{os.getpid()}"
-FAKE_SESSIONS = TMP_DIR / "sessions"
-TMP_DIR.mkdir(parents=True, exist_ok=True)
-FAKE_SESSIONS.mkdir(parents=True, exist_ok=True)
-sys.dont_write_bytecode = True
-
-os.environ["TMPDIR"] = str(TMP_DIR)
-os.environ["TEMP"] = str(TMP_DIR)
-os.environ["TMP"] = str(TMP_DIR)
-os.environ["DEEPSEEK_API_KEY"] = "sk-test-not-used"
-# 关键：把应用的存档目录隔离到临时目录，测试不再读写真实 sessions/
-os.environ["AI_PARTNER_SESSIONS_DIR"] = str(FAKE_SESSIONS)
-sys.path.insert(0, str(PROJECT))
-sys.path.insert(0, str(TMP_DIR))
+from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: F401
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -149,9 +133,7 @@ check("侧边栏会话列表里不再出现 index 变量",
 check("组件 key 只由会话 ID 构成（不含序号）",
       "{index}" not in sidebar_source and "_{index}" not in sidebar_source)
 
-# 清理隔离目录（真实 sessions/ 从未被触碰）
-for path in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
-    path.unlink()
+# 隔离目录由 _harness 在退出时统一删除（真实 sessions/ 从未被触碰）
 
 print()
 print("FAILURES:", failures if failures else "none")

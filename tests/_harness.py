@@ -1,0 +1,84 @@
+"""测试公共环境：临时目录、环境变量、清理。
+
+三条规矩（都来自踩过的坑）：
+1. 存档目录一律用 AI_PARTNER_SESSIONS_DIR 指到 tests/.tmp 下的隔离目录——
+   测试永远不碰真实的 sessions/。
+2. 所有临时产物都放在同一个 tests/.tmp 里，不再按 pid 建一堆目录。
+3. 每次运行开头先清空 tests/.tmp，所以磁盘上任何时候最多只有一份临时目录，
+   不会越攒越多。
+
+为什么清理放在"开头"而不是进程退出时：
+- atexit 不可靠：解释器退出时还有别的钩子会再往该目录写东西，跑完仍有残留；
+- Windows 上 os.kill(pid, 0) 对已退出的进程不报错，做不出"看守进程"来兜底。
+需要立刻清掉时用：`python tests/clean_tmp.py`
+（沙箱创建的目录带 `Everyone Deny DeleteSubdirectoriesAndFiles` 拒绝 ACE，
+  普通删除会失败，所以要先用 icacls 去掉这条规则。）
+
+用法：测试文件开头 import 本模块即可，路径与环境变量都已就绪。
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+TESTS_DIR = Path(__file__).resolve().parent
+PROJECT = TESTS_DIR.parent
+TMP_DIR = TESTS_DIR / ".tmp"
+SESSIONS_DIR = TMP_DIR / "sessions"
+
+
+def strip_deny_aces(path: Path) -> None:
+    """去掉目录上沙箱留下的拒绝删除 ACE（Windows）。"""
+    if os.name != "nt" or not path.exists():
+        return
+    try:
+        subprocess.run(
+            ["icacls", str(path), "/remove:d", "Everyone"],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - 清理失败不该影响测试
+        pass
+
+
+def reset_tmp() -> None:
+    """清空并重建临时目录（每次运行都从干净状态开始）。"""
+    strip_deny_aces(TMP_DIR)
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def purge(path: Path) -> bool:
+    """尽力删除 path，返回是否已不存在。"""
+    strip_deny_aces(path)
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        try:
+            subprocess.run(["cmd", "/c", "rmdir", "/s", "/q", str(path)],
+                           capture_output=True, check=False, timeout=60)
+        except Exception:  # noqa: BLE001
+            pass
+    return not path.exists()
+
+
+# 干净起点 + 环境变量 + 路径
+reset_tmp()
+sys.dont_write_bytecode = True
+os.environ["TMPDIR"] = str(TMP_DIR)
+os.environ["TEMP"] = str(TMP_DIR)
+os.environ["TMP"] = str(TMP_DIR)
+os.environ["DEEPSEEK_API_KEY"] = "sk-test-not-used"
+# 关键：把应用的存档目录隔离到临时目录
+os.environ["AI_PARTNER_SESSIONS_DIR"] = str(SESSIONS_DIR)
+# 让 tempfile 也把东西放进 TMP_DIR，别在系统临时目录里留下受限 ACL 的残留
+tempfile.tempdir = str(TMP_DIR)
+
+for _path in (str(PROJECT), str(TMP_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+

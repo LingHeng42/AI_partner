@@ -558,13 +558,14 @@ with st.sidebar:
     for session in session_list:
         current = session == st.session_state.current_session
         meta = session_meta(session)
-        # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致
+        # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致。
+        # 「是不是当前会话」由按钮颜色（type=primary）表示，名称里不再加"（当前）"
         label = st.session_state.session_title if current else meta["title"]
         pin_mark = "📌 " if meta["pinned"] else ""
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                f"{pin_mark}{label}（当前）" if current else f"{pin_mark}{label}",
+                f"{pin_mark}{label}",
                 width="stretch",
                 key=f"session_{session}",
                 help=f"会话 ID：{session}",

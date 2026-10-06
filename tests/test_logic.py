@@ -12,15 +12,7 @@ import time
 import types
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent.parent
-TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"run_{os.getpid()}"
-TMP_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["TMPDIR"] = str(TMP_DIR)
-os.environ["TEMP"] = str(TMP_DIR)
-os.environ["TMP"] = str(TMP_DIR)
-# 关键：把应用的存档目录隔离到临时目录，测试绝不读写真实 sessions/
-os.environ["AI_PARTNER_SESSIONS_DIR"] = str(TMP_DIR / "sessions")
-os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-not-used")
+from _harness import PROJECT, TMP_DIR  # noqa: F401  统一准备临时目录与环境变量
 
 failures = []
 

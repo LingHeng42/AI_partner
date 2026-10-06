@@ -46,12 +46,17 @@ requirements.txt     依赖清单
 
 ## 测试
 
-两个测试都不联网：一个用假的 `streamlit`/`openai` 模块测纯逻辑，另一个用 Streamlit 官方 `AppTest` 跑真实页面（OpenAI 客户端被替换为假实现）。
+三个测试都不联网，也不会碰真实的 `sessions/`（它们用 `AI_PARTNER_SESSIONS_DIR`
+把存档目录指到 `tests/.tmp` 下的隔离目录）：
 
 ```bash
-.venv\Scripts\python.exe tests\test_logic.py    # 存档 / 上下文截断 / 对话流程
-.venv\Scripts\python.exe tests\test_smoke.py    # 页面渲染 / 缺少 Key 的提示
+.venv\Scripts\python.exe tests\test_logic.py        # 存档 / 上下文截断 / 对话流程 / 重命名与置顶
+.venv\Scripts\python.exe tests\test_smoke.py        # 页面渲染 / 空会话不建档 / 新建会话回调
+.venv\Scripts\python.exe tests\test_row_render.py   # 会话条目与「⋯」操作菜单渲染 / 回车重命名
+.venv\Scripts\python.exe tests\clean_tmp.py         # 清掉测试临时目录 tests/.tmp
 ```
+
+`tests/.tmp` 每次运行开头都会被清空，所以不会累积；需要立刻清掉时跑 `clean_tmp.py`。
 
 ## 会话存档格式
 
