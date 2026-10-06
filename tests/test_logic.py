@@ -568,6 +568,35 @@ app.render_reply(_Sink())
 check("第二个会话发言后历史有两条", app.load_session_list() == [second_id, "2026-01-01_120000_000"],
       app.load_session_list())
 
+# --------------------------------------------------------------------------- #
+# 「第一轮对话后自动进入会话历史」的完整链路
+# 侧边栏只做两件事：load_session_list() 取列表、用 current_session 判断是否当前。
+# 下面按这个顺序断言：发言 → 落盘 → 列表包含它 → 被标记为当前。
+# --------------------------------------------------------------------------- #
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+auto_id = "2099-03-03_000000_000"
+app.st.session_state = _State()
+app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["thinking"] = False
+app.st.session_state["message"] = []
+app.st.session_state["current_session"] = auto_id
+app.st.session_state["session_title"] = "自动归档测试"
+
+check("发言前历史里没有它", auto_id not in app.load_session_list(), app.load_session_list())
+
+app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
+app.client = FakeClient(completions=FakeCompletions())
+app.render_reply(_Sink())
+
+check("发言后自动落盘", (tmp / f"{auto_id}.json").exists(), [f.name for f in tmp.glob("*.json")])
+check("发言后自动出现在会话历史里", auto_id in app.load_session_list(), app.load_session_list())
+check("它在历史里排在第一位（最新）", app.load_session_list()[0] == auto_id, app.load_session_list())
+check("侧边栏会把它标记为当前会话", app.st.session_state["current_session"] == auto_id)
+check("它在历史里用的是自定义名称", app.session_title(auto_id) == "自动归档测试", app.session_title(auto_id))
+check("发言后历史里只有它一条", app.load_session_list() == [auto_id], app.load_session_list())
+
 app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
                              "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})
 app.reset_advanced()

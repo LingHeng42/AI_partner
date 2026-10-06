@@ -73,6 +73,10 @@ class _Completions:
             raise RuntimeError("fake network error")
         return iter([_chunk(t) for t in STATE["chunks"]])
 
+    def queue(self, chunks):
+        """测试用：让下一次 render_reply 返回指定正文分片。"""
+        STATE["chunks"] = list(chunks)
+
 
 class _Chat:
     completions = _Completions()
@@ -86,6 +90,7 @@ class FakeOpenAI:
 
 st.cache_resource.clear()
 _app.OpenAI = FakeOpenAI
+_app.__dict__["_FAKE_OPENAI_STATE"] = STATE
 ''',
     encoding="utf-8",
 )
@@ -160,6 +165,12 @@ if new_button is not None:
           [f.name for f in sessions_dir.glob("*.json")])
 for leftover in sessions_dir.glob("*.json"):
     leftover.unlink()
+
+# --------------------------------------------------------------------------- #
+# D. 「第一轮对话后会话自动出现在历史里」的验证放在 tests/test_logic.py：
+#    它直接按 发消息 → render_reply 落盘 → load_session_list 的顺序断言，
+#    而这里同一进程内只有一次 AppTest 能真正渲染页面，做不出"先空后满"的两轮观察。
+# --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
 # C. 缺少 API Key 的分支
