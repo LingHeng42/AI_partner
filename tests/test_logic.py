@@ -13,8 +13,8 @@ import types
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
-TMP_DIR = Path(__file__).resolve().parent / ".tmp"
-TMP_DIR.mkdir(exist_ok=True)
+TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"run_{os.getpid()}"
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
@@ -85,6 +85,9 @@ class _State:
     def get(self, key, default=None):
         return self._data.get(key, default)
 
+    def setdefault(self, key, default=None):
+        return self._data.setdefault(key, default)
+
     def update(self, other):
         self._data.update(other)
 
@@ -113,14 +116,60 @@ class _Recorder:
         return _Sink()
 
 
+class _ExpanderSink(_Sink):
+    """模拟 st.expander：记录标签与展开状态的每一次变化，可当上下文管理器。"""
+
+    def __init__(self, label, expanded, key=None):
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "states", [expanded])
+
+    @property
+    def expanded(self):
+        return self.states[-1]
+
+    @expanded.setter
+    def expanded(self, value):
+        self.states.append(value)
+
+    def __enter__(self):
+        expanders.active.append(self)
+        return self
+
+    def __exit__(self, *exc):
+        expanders.calls.append({"label": self.label, "expanded": self.expanded, "history": list(self.states)})
+        if self in expanders.active:
+            expanders.active.remove(self)
+        return False
+
+
+class _Expanders:
+    """st.expander 的替代品：保留每个面板对象，便于断言最终的展开状态。"""
+
+    def __init__(self):
+        self.calls = []
+        self.active = []
+        self.sinks = []
+
+    def __call__(self, label, expanded=False, **kwargs):
+        sink = _ExpanderSink(label, expanded, kwargs.get("key"))
+        self.sinks.append(sink)
+        return sink
+
+    def by_label(self, label):
+        return [s for s in self.sinks if s.label == label]
+
+
 errors = _Recorder("error")
 warnings = _Recorder("warning")
+expanders = _Expanders()
 fake_st = _FakeStreamlit("streamlit")
 fake_st.session_state = _State()
 fake_st.cache_resource = _Cache()
 fake_st.set_page_config = _Sink()
 fake_st.error = errors
 fake_st.warning = warnings
+fake_st.expander = expanders
 fake_st.caption = _Sink()
 fake_st.stop = _Sink()
 fake_st.rerun = _Sink()
@@ -194,6 +243,8 @@ for _f in tmp.glob("*.json"):
 app.SESSIONS_DIR = tmp
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["thinking"] = False
 app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
 
@@ -267,10 +318,10 @@ check("删除非当前会话清掉文件", not partial.exists())
 # --------------------------------------------------------------------------- #
 # 对话流程 render_reply（真实执行流式渲染、异常处理与落盘）
 # --------------------------------------------------------------------------- #
-def chunk(text):
-    delta = type("Delta", (), {"content": text})()
+def chunk(text=None, reasoning=None, no_choices=False, no_delta=False):
+    delta = None if no_delta else type("Delta", (), {"content": text, "reasoning_content": reasoning})()
     choice = type("Choice", (), {"delta": delta})()
-    return type("Chunk", (), {"choices": [choice]})()
+    return type("Chunk", (), {"choices": [] if no_choices else [choice]})()
 
 
 class FakeCompletions:
@@ -286,7 +337,8 @@ class FakeCompletions:
             raise RuntimeError("fake network error")
         if self.empty:
             return iter([])
-        return iter([chunk(t) for t in self.chunks])
+        return iter(self.chunks if all(hasattr(c, "choices") for c in self.chunks)
+                    else [chunk(t) for t in self.chunks])
 
 
 class FakeClient:
@@ -294,12 +346,18 @@ class FakeClient:
         self.chat = type("Chat", (), {"completions": kwargs.pop("completions")})()
 
 
-app.st.session_state = _State()
-app.st.session_state.update(app.DEFAULT_PROFILE)
-app.st.session_state["current_session"] = "2026-01-01_120000_000"
-app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
-app.st.session_state["thinking"] = False
+def fresh_state(**overrides):
+    app.st.session_state = _State()
+    app.st.session_state.update(app.DEFAULT_PROFILE)
+    app.st.session_state.update(app.DEFAULT_ADVANCED)
+    app.st.session_state["thinking"] = False
+    app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
+    app.st.session_state["current_session"] = "2026-01-01_120000_000"
+    for key, value in overrides.items():
+        app.st.session_state[key] = value
 
+
+fresh_state()
 completions = FakeCompletions()
 app.client = FakeClient(completions=completions)
 app.render_reply(_Sink())
@@ -310,8 +368,9 @@ check("流式分片拼接为一条回答",
 check("请求使用 deepseek-flash", completions.calls[-1]["model"] == "deepseek-flash")
 check("请求 stream=True", completions.calls[-1]["stream"] is True)
 check("请求带上了 system + 历史", completions.calls[-1]["messages"][1] == {"role": "user", "content": "你好"})
-check("思考关闭时 reasoning_effort 为 None", completions.calls[-1]["reasoning_effort"] is None)
+check("思考关闭时不发 reasoning_effort", "reasoning_effort" not in completions.calls[-1])
 check("思考关闭时 thinking=disabled", completions.calls[-1]["extra_body"] == {"thinking": {"type": "disabled"}})
+check("思考关闭时不渲染思考折叠面板", expanders.by_label("🤔 思考过程") == [], [s.label for s in expanders.sinks])
 check("回答后自动落盘", (tmp / "2026-01-01_120000_000.json").exists())
 check("落盘内容包含新回答",
       json.loads((tmp / "2026-01-01_120000_000.json").read_text(encoding="utf-8"))["message"][-1]["content"] == "你好，人类")
@@ -320,9 +379,67 @@ app.st.session_state["thinking"] = True
 app.render_reply(_Sink())
 check("思考开启时 reasoning_effort=low", completions.calls[-1]["reasoning_effort"] == "low")
 check("思考开启时 thinking=enabled", completions.calls[-1]["extra_body"] == {"thinking": {"type": "enabled"}})
+check("思考开启时渲染思考折叠面板", len(expanders.by_label("🤔 思考过程")) == 1,
+      [s.label for s in expanders.sinks])
+
+# --------------------------------------------------------------------------- #
+# 深度思考：推理内容流式进入折叠面板，并随回答一起保存
+# --------------------------------------------------------------------------- #
+expanders.sinks.clear()
+fresh_state(thinking=True)
+reasoning_chunks = [
+    chunk(reasoning="先看他问的是什么。"),
+    chunk(reasoning="嗯，得用第一人称回答。"),
+    chunk(text="我"),
+    chunk(text="在。"),
+]
+app.client = FakeClient(completions=FakeCompletions(chunks=reasoning_chunks))
+app.render_reply(_Sink())
+
+reply = app.st.session_state.message[-1]
+check("推理内容被记录下来", reply.get("reasoning_content") == "先看他问的是什么。嗯，得用第一人称回答。", reply)
+check("正文不混入推理内容", reply["content"] == "我在。", reply)
+blocks = expanders.by_label("🤔 思考过程")
+check("思考过程渲染在折叠面板里", len(blocks) == 1, [s.label for s in expanders.sinks])
+check("思考中自动展开过", blocks and True in blocks[0].states, blocks[0].states if blocks else None)
+check("流式结束后保持展开（不强制折叠）", blocks and blocks[0].expanded is True, blocks[0].states if blocks else None)
+check("思考面板带 key（用户手动开合会被记住）", blocks and blocks[0].key == "reasoning_panel",
+      blocks[0].key if blocks else None)
+# 模拟用户手动折叠：on_change 回调把组件状态镜像到状态键
+app.st.session_state["reasoning_panel"] = False
+app._remember_expander("reasoning_panel", "show_reasoning")
+check("用户手动折叠后被记住", app.st.session_state["show_reasoning"] is False, app.st.session_state["show_reasoning"])
+check("推理内容随会话落盘",
+      json.loads((tmp / "2026-01-01_120000_000.json").read_text(encoding="utf-8"))["message"][-1].get("reasoning_content")
+      == "先看他问的是什么。嗯，得用第一人称回答。")
+
+# 带推理的历史回放：只对含推理的回答开折叠面板
+expanders.sinks.clear()
+app.st.session_state.message = [
+    {"role": "user", "content": "问题"},
+    {"role": "assistant", "content": "带推理的回答", "reasoning_content": "推理过程"},
+    {"role": "assistant", "content": "不带推理的回答"},
+]
+app.render_history()
+check("回放时只对含推理的回答生成折叠面板", len(expanders.sinks) == 1 and expanders.sinks[0].label == "🤔 思考过程",
+      [s.label for s in expanders.sinks])
+check("回放时思考面板默认折叠", expanders.sinks and expanders.sinks[0].states == [False],
+      expanders.sinks[0].states if expanders.sinks else None)
+check("回放的面板各有独立 key", expanders.sinks and expanders.sinks[0].key == "history_reasoning_1",
+      expanders.sinks[0].key if expanders.sinks else None)
+
+# 带推理的历史会随请求回传给 API（官方示例的用法）
+app.st.session_state.message = [
+    {"role": "user", "content": "问题"},
+    {"role": "assistant", "content": "回答", "reasoning_content": "推理"},
+]
+sent = app.build_messages()
+check("对话历史带上 reasoning_content", sent[-1].get("reasoning_content") == "推理", sent[-1])
+check("普通消息不带 reasoning_content", "reasoning_content" not in sent[1], sent[1])
 
 # 异常：记录 st.error，不写入 assistant 消息，页面不抛异常
 errors.calls.clear()
+fresh_state()
 app.st.session_state["message"] = [{"role": "user", "content": "会失败"}]
 app.client = FakeClient(completions=FakeCompletions(boom=True))
 app.render_reply(_Sink())
@@ -331,12 +448,41 @@ check("异常时不写入 assistant 消息", app.st.session_state.message == [{"
 
 # 空回答：给出 warning，同样不写入历史
 warnings.calls.clear()
+fresh_state()
 app.st.session_state["current_session"] = "2026-01-01_130000_000"
 app.st.session_state["message"] = [{"role": "user", "content": "空回答"}]
 app.client = FakeClient(completions=FakeCompletions(empty=True))
 app.render_reply(_Sink())
 check("空回答给出 st.warning", warnings.calls and "没有返回" in warnings.calls[-1], warnings.calls[-1:])
 check("空回答不写入历史", app.st.session_state.message == [{"role": "user", "content": "空回答"}])
+
+# --------------------------------------------------------------------------- #
+# 高级配置：请求参数是否按配置拼装
+# --------------------------------------------------------------------------- #
+fresh_state()
+payload = app.build_request_payload()
+check("默认带上 temperature=1.0", payload["temperature"] == 1.0, payload.get("temperature"))
+check("默认带上 top_p=1.0", payload["top_p"] == 1.0, payload.get("top_p"))
+check("默认不发送 max_tokens", "max_tokens" not in payload)
+check("惩罚项为 0 时不发送", "frequency_penalty" not in payload and "presence_penalty" not in payload)
+check("system prompt 在 payload 里", payload["messages"][0]["role"] == "system")
+
+fresh_state(temperature=0.3, top_p=0.8, limit_tokens=True, max_tokens=1024,
+            frequency_penalty=0.5, presence_penalty=-0.2)
+payload = app.build_request_payload()
+check("自定义温度生效", payload["temperature"] == 0.3)
+check("自定义 top_p 生效", payload["top_p"] == 0.8)
+check("勾选后发送 max_tokens", payload["max_tokens"] == 1024)
+check("非零 frequency_penalty 生效", payload["frequency_penalty"] == 0.5)
+check("非零 presence_penalty 生效", payload["presence_penalty"] == -0.2)
+
+fresh_state(limit_tokens=False, max_tokens=1024)
+check("取消勾选后不发送 max_tokens", "max_tokens" not in app.build_request_payload())
+
+fresh_state(temperature=0.5)
+app.client = FakeClient(completions=FakeCompletions())
+app.render_reply(_Sink())
+check("高级参数真正传给了模型调用", app.client.chat.completions.calls[-1]["temperature"] == 0.5)
 
 # --------------------------------------------------------------------------- #
 # 会话 ID 与源码层面的重复度

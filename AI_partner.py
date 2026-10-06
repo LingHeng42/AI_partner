@@ -48,6 +48,20 @@ MODEL_NAME = "deepseek-flash"
 MAX_CONTEXT_MESSAGES = 40
 MAX_CONTEXT_CHARS = 12000
 
+# --------------------------------------------------------------------------- #
+# 高级生成参数（侧边栏「高级配置」里可调）
+# 默认值与不传参时的服务端默认行为保持一致
+# --------------------------------------------------------------------------- #
+DEFAULT_ADVANCED = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "limit_tokens": False,
+    "max_tokens": 4096,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+}
+ADVANCED_KEYS = tuple(DEFAULT_ADVANCED)
+
 
 def load_dotenv_file(path: Path = BASE_DIR / ".env") -> None:
     """极简 .env 读取：KEY=VALUE 逐行，已存在的环境变量优先。"""
@@ -188,34 +202,112 @@ def trim_context(messages: list) -> list:
 
 def build_messages() -> list:
     system_content = SYSTEM_PROMPT.format(**profile_from_state())
-    return [{"role": "system", "content": system_content}, *trim_context(st.session_state.message)]
+    history = []
+    for msg in trim_context(st.session_state.message):
+        # 官方示例会把 reasoning_content 一起回传，API 会忽略它、也不计入上下文
+        if msg.get("role") == "assistant" and msg.get("reasoning_content"):
+            history.append({
+                "role": "assistant",
+                "content": msg.get("content", ""),
+                "reasoning_content": msg["reasoning_content"],
+            })
+        else:
+            history.append({"role": msg["role"], "content": msg.get("content", "")})
+    return [{"role": "system", "content": system_content}, *history]
+
+
+def advanced_value(name: str):
+    return st.session_state.get(name, DEFAULT_ADVANCED[name])
+
+
+def build_request_payload() -> dict:
+    """按侧边栏的高级配置拼装请求参数，未启用的项不发送。"""
+    payload = {
+        "model": MODEL_NAME,
+        "messages": build_messages(),
+        "stream": True,
+        "temperature": advanced_value("temperature"),
+        "top_p": advanced_value("top_p"),
+        "extra_body": {
+            "thinking": {"type": "enabled" if st.session_state.thinking else "disabled"},
+        },
+    }
+    if st.session_state.thinking:
+        payload["reasoning_effort"] = "low"
+    if advanced_value("limit_tokens"):
+        payload["max_tokens"] = int(advanced_value("max_tokens"))
+    if advanced_value("frequency_penalty"):
+        payload["frequency_penalty"] = advanced_value("frequency_penalty")
+    if advanced_value("presence_penalty"):
+        payload["presence_penalty"] = advanced_value("presence_penalty")
+    return payload
+
+
+def _first_choice(chunk):
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return None
+    return choices[0]
+
+
+def _delta_text(chunk) -> tuple:
+    """返回本片段里的 (推理内容, 正文内容)，两者都可能为空字符串。"""
+    choice = _first_choice(chunk)
+    delta = getattr(choice, "delta", None) if choice is not None else None
+    if delta is None:
+        return "", ""
+    reasoning = getattr(delta, "reasoning_content", None) or ""
+    content = getattr(delta, "content", None) or ""
+    return reasoning, content
+
+
+def _remember_expander(widget_key: str, state_key: str) -> None:
+    """把用户手动展开/折叠的状态镜像到状态键，避免每次重跑都被重置。"""
+    st.session_state[state_key] = st.session_state[widget_key]
+
+
+def reasoning_expander(key: str, state_key: str, expanded: bool):
+    """带记忆的「思考过程」折叠面板：用户手动开合后不会被流式重跑重置。"""
+    st.session_state.setdefault(state_key, expanded)
+    return st.expander(
+        "🤔 思考过程",
+        expanded=st.session_state[state_key],
+        key=key,
+        on_change=_remember_expander,
+        args=(key, state_key),
+    )
 
 
 def render_reply(placeholder) -> None:
-    """请求模型并把流式回答渲染到 placeholder，最后写入会话历史并落盘。
+    """请求模型，把流式推理渲染进折叠面板、正文渲染进气泡，最后写入历史并落盘。
 
     异常在这里被消化成 st.error，调用方（页面脚本）不再需要 try/except。
     """
-    full_response = ""
+    reasoning, full_response = "", ""
+    thinking_enabled = bool(st.session_state.thinking)
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=build_messages(),
-            stream=True,
-            reasoning_effort="low" if st.session_state.thinking else None,
-            extra_body={"thinking": {"type": "enabled" if st.session_state.thinking else "disabled"}},
-        )
+        response = client.chat.completions.create(**build_request_payload())
         with placeholder.chat_message("assistant"):
+            reasoning_placeholder, reasoning_text = None, None
+            if thinking_enabled:
+                reasoning_placeholder = reasoning_expander("reasoning_panel", "show_reasoning", True)
+                with reasoning_placeholder:
+                    reasoning_text = st.empty()
             message_placeholder = st.empty()
+            if thinking_enabled:
+                message_placeholder.markdown("_正在思考…_")
             for chunk in response:
-                if not getattr(chunk, "choices", None):
-                    continue
-                delta = chunk.choices[0].delta
-                if delta is None or not delta.content:
-                    continue
-                full_response += delta.content
-                # 末尾补一个光标，让流式输出的边界可见；只更新占位符，不重建整条消息
-                message_placeholder.markdown(full_response + "▌")
+                reasoning_piece, content_piece = _delta_text(chunk)
+                if reasoning_piece:
+                    reasoning += reasoning_piece
+                    if reasoning_placeholder is not None:
+                        reasoning_text.markdown(reasoning + "▌")
+                if content_piece:
+                    full_response += content_piece
+                    # 末尾补一个光标，让流式输出的边界可见；只更新占位符，不重建整条消息
+                    message_placeholder.markdown(full_response + "▌")
+            if reasoning_placeholder is not None:
+                reasoning_text.markdown(reasoning or "_（本次没有输出推理内容）_")
             message_placeholder.markdown(full_response)
     except Exception as e:  # noqa: BLE001 - 网络/限流/余额等异常不该把页面打成 traceback
         placeholder.empty()
@@ -223,11 +315,25 @@ def render_reply(placeholder) -> None:
         st.caption("本条消息已保留在对话中，可直接重试或继续输入。")
 
     if full_response:
-        st.session_state.message.append({"role": "assistant", "content": full_response})
+        reply = {"role": "assistant", "content": full_response}
+        if reasoning:
+            reply["reasoning_content"] = reasoning
+        st.session_state.message.append(reply)
     else:
         st.warning("模型没有返回任何内容，本次回答未记录。")
 
     save_session()
+
+
+def render_history() -> None:
+    """按存储顺序回放历史：带推理的回答把思考过程放进折叠面板。"""
+    for index, msg in enumerate(st.session_state.message):
+        with st.chat_message(msg["role"]):
+            if msg.get("reasoning_content"):
+                with reasoning_expander(f"history_reasoning_{index}", f"history_reasoning_open_{index}", False):
+                    st.markdown(msg["reasoning_content"])
+            if msg.get("content"):
+                st.markdown(msg["content"])
 
 
 # --------------------------------------------------------------------------- #
@@ -246,12 +352,11 @@ st.set_page_config(
 
 # 会话状态初始化
 for _key, _value in DEFAULT_PROFILE.items():
-    if _key not in st.session_state:
-        st.session_state[_key] = _value
-if "message" not in st.session_state:
-    st.session_state.message = []
-if "thinking" not in st.session_state:
-    st.session_state.thinking = False
+    st.session_state.setdefault(_key, _value)
+for _key, _value in DEFAULT_ADVANCED.items():
+    st.session_state.setdefault(_key, _value)
+st.session_state.setdefault("message", [])
+st.session_state.setdefault("thinking", False)
 if "current_session" not in st.session_state:
     st.session_state.current_session = new_session_id()
 
@@ -271,9 +376,8 @@ if LOGO_PATH.exists():
 # 当前会话标识（原来的 st.text 调试残留，改为弱化的说明文字）
 st.caption(f"当前会话：{st.session_state.current_session}")
 
-# 展示历史对话
-for msg in st.session_state.message:
-    st.chat_message(msg["role"]).write(msg["content"])
+# 展示历史对话（开启过深度思考的回答会带上可折叠的思考过程）
+render_history()
 
 # --------------------------------------------------------------------------- #
 # 侧边栏
@@ -334,8 +438,57 @@ with st.sidebar:
     st.toggle(
         "深度思考",
         key="thinking",
-        help="开启后模型会先推理再回答，速度更慢但更严谨；关闭则直接作答。",
+        help="开启后模型会先推理再回答（推理过程显示在可折叠的「思考过程」里），速度更慢但更严谨；关闭则直接作答。",
     )
+
+    # 高级配置：默认折叠，点开才展开（展开状态会被记住）
+    with st.expander("⚙️ 高级配置", expanded=False, key="advanced_panel"):
+        st.slider(
+            "温度 (temperature)",
+            min_value=0.0,
+            max_value=2.0,
+            step=0.05,
+            key="temperature",
+            help="越高越天马行空、越低越稳定保守。角色扮演想有个性可以调高，想稳定复现就调低。",
+        )
+        st.slider(
+            "核采样 (top_p)",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key="top_p",
+            help="与温度二选一调即可。一般固定温度、把 top_p 留在 1.0。",
+        )
+        st.slider(
+            "重复惩罚 (frequency_penalty)",
+            min_value=-2.0,
+            max_value=2.0,
+            step=0.1,
+            key="frequency_penalty",
+            help="正值会降低重复用词的概率，负值鼓励复读。",
+        )
+        st.slider(
+            "话题新鲜度 (presence_penalty)",
+            min_value=-2.0,
+            max_value=2.0,
+            step=0.1,
+            key="presence_penalty",
+            help="正值鼓励聊新话题，负值鼓励围绕已有内容展开。",
+        )
+        st.checkbox("限制单次回复长度", key="limit_tokens", help="不勾选则由服务端决定上限。")
+        if st.session_state.limit_tokens:
+            st.number_input(
+                "最大 tokens",
+                min_value=256,
+                max_value=32768,
+                step=256,
+                key="max_tokens",
+                help="单次回答（不含思考过程）的长度上限。",
+            )
+        if st.button("恢复默认值", width="stretch"):
+            for _key, _value in DEFAULT_ADVANCED.items():
+                st.session_state[_key] = _value
+            st.rerun()
 
 
 # --------------------------------------------------------------------------- #

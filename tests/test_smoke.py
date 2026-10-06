@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
-TMP_DIR = Path(__file__).resolve().parent / ".tmp"
-TMP_DIR.mkdir(exist_ok=True)
+TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"run_{os.getpid()}"
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# 把字节码缓存也限制在本次运行的目录里，避免复用上一次运行留下的 .pyc
+sys.dont_write_bytecode = True
 
 # 临时文件留在仓库内，避免写到系统临时目录
 os.environ["TMPDIR"] = str(TMP_DIR)
@@ -109,6 +112,9 @@ check("昵称字段名为 nickname", at.session_state["nickname"] == "溟月", a
 check("侧边栏三个多行输入框齐全", [t.label for t in at.text_area] == ["性格", "角色简介", "输出规则"], [t.label for t in at.text_area])
 check("侧边栏有深度思考开关", [t.label for t in at.toggle] == ["深度思考"], [t.label for t in at.toggle])
 check("新建会话按钮存在", any(b.label == "新建会话" for b in at.button))
+advanced = [e for e in at.expander if "高级配置" in (e.label or "")]
+check("高级配置折叠面板存在", len(advanced) == 1, [e.label for e in at.expander])
+check("高级配置默认折叠", advanced and advanced[0].proto.expanded is False, advanced[0].proto.expanded if advanced else None)
 check("会话历史分区存在", any(s.value == "会话历史" for s in at.subheader), [s.value for s in at.subheader])
 check("管理角色分区存在", any(s.value == "管理角色" for s in at.subheader), [s.value for s in at.subheader])
 check("生成参数分区存在", any(s.value == "生成参数" for s in at.subheader), [s.value for s in at.subheader])
