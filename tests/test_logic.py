@@ -253,7 +253,8 @@ app.save_session()
 saved = tmp / "2026-01-01_120000_000.json"
 check("会话存档写入成功", saved.exists())
 data = json.loads(saved.read_text(encoding="utf-8"))
-check("存档字段 = 会话名称 + 四大人设 + message", set(data) == set(app.PROFILE_KEYS) | {"message", "title"}, sorted(data))
+check("存档字段 = 名称 + 置顶 + 四大人设 + message",
+      set(data) == set(app.PROFILE_KEYS) | {"message", "title", "pinned"}, sorted(data))
 check("存档文件名始终是会话 ID", saved.name == "2026-01-01_120000_000.json", saved.name)
 check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
 check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
@@ -261,6 +262,10 @@ check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120
 # 自定义名称：显示用名称与文件名解耦
 check("会话名称被写入存档", data["title"] == "第一次聊天", data.get("title"))
 check("读回自定义会话名称", app.session_title("2026-01-01_120000_000") == "第一次聊天")
+check("默认不置顶", data["pinned"] is False, data.get("pinned"))
+check("session_meta 同时给出名称与置顶状态",
+      app.session_meta("2026-01-01_120000_000") == {"title": "第一次聊天", "pinned": False},
+      app.session_meta("2026-01-01_120000_000"))
 
 app.st.session_state["message"] = []
 app.st.session_state["nickname"] = "被覆盖"
@@ -652,6 +657,112 @@ check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)
 
 app.st.rerun = _Sink()
 check("session_file_exists 能正确判断", app.session_file_exists("no-such") is False)
+
+# --------------------------------------------------------------------------- #
+# 重命名与置顶
+# --------------------------------------------------------------------------- #
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app.st.rerun = _Recorder("rerun")
+app.st.session_state = _State()
+app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["thinking"] = False
+app.st.session_state["session_title"] = "旧名字"
+app.st.session_state["session_pinned"] = False
+app.st.session_state["current_session"] = "2026-05-05_120000_000"
+app.st.session_state["message"] = [{"role": "user", "content": "内容"}]
+app.save_session()
+
+app.rename_session("2026-05-05_120000_000", "崭新名字")
+check("重命名写入存档", app.session_title("2026-05-05_120000_000") == "崭新名字",
+      app.session_title("2026-05-05_120000_000"))
+check("重命名不改变文件名", (tmp / "2026-05-05_120000_000.json").exists())
+check("重命名保留消息", len(app.session_meta("2026-05-05_120000_000")) == 2
+      and json.loads((tmp / "2026-05-05_120000_000.json").read_text(encoding="utf-8"))["message"]
+      == [{"role": "user", "content": "内容"}])
+check("重命名当前会话会同步输入框的值", app.st.session_state["session_title"] == "崭新名字",
+      app.st.session_state["session_title"])
+
+# 回调形式：不传 new_title，从输入框的 key 里取值（这就是回车重命名的路径）
+app.st.session_state["rename_input_test"] = "回车改的名"
+app.rename_session("2026-05-05_120000_000", input_key="rename_input_test")
+check("从输入框 key 取值重命名", app.session_title("2026-05-05_120000_000") == "回车改的名",
+      app.session_title("2026-05-05_120000_000"))
+check("回车重命名同样同步 session_title", app.st.session_state["session_title"] == "回车改的名",
+      app.st.session_state["session_title"])
+
+# 输入框为空时回退成默认名称
+app.st.session_state["rename_input_blank"] = "   "
+app.rename_session("2026-05-05_120000_000", input_key="rename_input_blank")
+check("输入框为空回退成默认名称", app.session_title("2026-05-05_120000_000") == app.DEFAULT_SESSION_TITLE,
+      app.session_title("2026-05-05_120000_000"))
+
+# 写盘失败时不留临时文件（这正是之前改名失败后残留 .json.tmp 的原因）
+real_replace = app.os.replace
+app.os.replace = lambda *a, **k: (_ for _ in ()).throw(PermissionError("locked"))
+try:
+    app.rename_session("2026-05-05_120000_000", "写不进去")
+    check("写盘失败时给出 st.error", errors.calls and "重命名失败" in errors.calls[-1], errors.calls[-1:])
+finally:
+    app.os.replace = real_replace
+check("写盘失败后不留临时文件", not list(tmp.glob("*.tmp*")), [p.name for p in tmp.glob("*.tmp*")])
+check("写盘失败不影响原存档",
+      app.session_title("2026-05-05_120000_000") == app.DEFAULT_SESSION_TITLE,
+      app.session_title("2026-05-05_120000_000"))
+
+# 空名字回退成默认名称
+app.rename_session("2026-05-05_120000_000", "   ")
+check("空名字回退成默认名称", app.session_title("2026-05-05_120000_000") == app.DEFAULT_SESSION_TITLE,
+      app.session_title("2026-05-05_120000_000"))
+
+# 置顶
+app.set_pinned("2026-05-05_120000_000", True)
+check("置顶写入存档", app.session_meta("2026-05-05_120000_000")["pinned"] is True)
+check("置顶不影响名称", app.session_title("2026-05-05_120000_000") == app.DEFAULT_SESSION_TITLE)
+
+# 置顶排序（上一步已把 2026-05-05 置顶，所以先取消掉再验证时间倒序）
+app.st.session_state["current_session"] = "2026-05-06_120000_000"
+app.st.session_state["message"] = [{"role": "user", "content": "第二个"}]
+app.save_session()
+app.set_pinned("2026-05-05_120000_000", False)
+check("未置顶时按时间倒序",
+      app.load_session_list() == ["2026-05-06_120000_000", "2026-05-05_120000_000"],
+      app.load_session_list())
+app.set_pinned("2026-05-05_120000_000", True)
+check("置顶更早的会话后排到最前",
+      app.load_session_list() == ["2026-05-05_120000_000", "2026-05-06_120000_000"],
+      app.load_session_list())
+app.set_pinned("2026-05-06_120000_000", True)
+check("两个都置顶时按时间倒序",
+      app.load_session_list() == ["2026-05-06_120000_000", "2026-05-05_120000_000"],
+      app.load_session_list())
+app.set_pinned("2026-05-06_120000_000", False)
+check("取消置顶后落到未置顶段（仍在置顶项之后）",
+      app.load_session_list() == ["2026-05-05_120000_000", "2026-05-06_120000_000"],
+      app.load_session_list())
+app.set_pinned("2026-05-05_120000_000", False)
+check("全部取消置顶后恢复时间倒序",
+      app.load_session_list() == ["2026-05-06_120000_000", "2026-05-05_120000_000"],
+      app.load_session_list())
+
+# 加载会话时带上置顶状态
+app.set_pinned("2026-05-05_120000_000", True)
+app.st.session_state["session_pinned"] = False
+app.load_selected_session("2026-05-05_120000_000")
+check("加载会话恢复置顶状态", app.st.session_state["session_pinned"] is True)
+check("加载会话恢复名称", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE)
+
+# 新建会话重置置顶状态
+app.new_session()
+check("新建会话后置顶状态归零", app.st.session_state["session_pinned"] is False)
+
+# 老存档没有 pinned 字段时按未置顶处理
+legacy_no_pin = tmp / "2026-05-07_120000_000.json"
+legacy_no_pin.write_text(json.dumps({"title": "老档", "message": []}), encoding="utf-8")
+check("缺 pinned 字段的老存档视为未置顶", app.session_meta("2026-05-07_120000_000")["pinned"] is False)
+legacy_no_pin.unlink()
+app.st.rerun = _Sink()
 
 app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
                              "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})

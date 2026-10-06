@@ -94,16 +94,93 @@ def profile_from_state() -> dict:
     return {key: st.session_state[key] for key in PROFILE_KEYS}
 
 
-def session_title(session_name: str) -> str:
-    """读某个存档的自定义会话名称；没设置过就回退成会话 ID（时间戳）。"""
+def session_meta(session_name: str) -> dict:
+    """读某个存档的元信息（名称、是否置顶）；读不出来时给出安全默认值。"""
+    meta = {"title": session_name, "pinned": False}
     try:
         path = _safe_session_path(session_name)
         if not path.exists():
-            return session_name
+            return meta
         with path.open("r", encoding="utf-8") as f:
-            return (json.load(f).get("title") or "").strip() or session_name
-    except Exception:  # noqa: BLE001 - 名称读不出来不该影响整个侧边栏
-        return session_name
+            data = json.load(f)
+        meta["title"] = (data.get("title") or "").strip() or session_name
+        meta["pinned"] = bool(data.get("pinned"))
+    except Exception:  # noqa: BLE001 - 元信息损坏不该影响整个侧边栏
+        pass
+    return meta
+
+
+def session_title(session_name: str) -> str:
+    """读某个存档的自定义会话名称；没设置过就回退成会话 ID（时间戳）。"""
+    return session_meta(session_name)["title"]
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """原子写 JSON：先写临时文件再替换，失败时清理临时文件。
+
+    临时文件用随机后缀，避免和上一次失败残留的 .tmp 互相干扰。
+    """
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        for attempt in range(5):  # Windows 上杀毒/索引可能短暂占用文件，重试几次
+            try:
+                os.replace(tmp, path)  # 原子替换
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        # 成功时 tmp 已被 replace 掉；失败时把它删掉，不留孤儿文件
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _update_session_meta(session_name: str, **changes) -> None:
+    """就地更新存档里的元信息字段（title / pinned），保留消息与人设。"""
+    path = _safe_session_path(session_name)
+    if not path.exists():
+        return
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.update(changes)
+    _write_json_atomic(path, data)
+
+
+def rename_session(session_name: str, new_title: str = None, input_key: str = None) -> None:
+    """重命名会话：只改存档里的 title，不重命名文件。
+
+    作为 st.text_input 的 on_change 回调执行（回调先于控件实例化）：
+    不传 new_title 时从 input_key 指向的输入框里取值；重命名当前会话时同步
+    st.session_state['session_title']，让侧边栏的「会话名称」和主区域标题跟着变。
+    这个同步**只能**在回调里做，否则会撞上
+    StreamlitWidgetAlreadyInstantiatedError。
+    """
+    if new_title is None:
+        new_title = st.session_state.get(input_key, "")
+    title = (new_title or "").strip() or DEFAULT_SESSION_TITLE
+    try:
+        _update_session_meta(session_name, title=title)
+        if session_name == st.session_state.get("current_session"):
+            st.session_state.session_title = title
+    except Exception as e:  # noqa: BLE001
+        st.error(f"重命名失败: {e}")
+
+
+def set_pinned(session_name: str, pinned: bool) -> None:
+    """置顶 / 取消置顶会话（写入存档的 pinned 字段），同样走回调。"""
+    try:
+        _update_session_meta(session_name, pinned=bool(pinned))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"置顶失败: {e}")
+        return
+    st.rerun()
 
 
 def reset_profile() -> None:
@@ -125,33 +202,23 @@ def save_session() -> None:
         return
     session_data = {
         "title": st.session_state.get("session_title", ""),
+        "pinned": bool(st.session_state.get("session_pinned", False)),
         "message": st.session_state.message,
         **profile_from_state(),
     }
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    target = SESSIONS_DIR / f"{st.session_state.current_session}.json"
-    tmp = target.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(session_data, f, ensure_ascii=False, indent=2)
-    for attempt in range(5):  # Windows 上杀毒/索引可能短暂占用文件，重试几次
-        try:
-            os.replace(tmp, target)  # 原子替换
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            time.sleep(0.05 * (attempt + 1))
+    _write_json_atomic(SESSIONS_DIR / f"{st.session_state.current_session}.json", session_data)
 
 
 def load_session_list() -> list:
-    """会话历史（新→旧）。
+    """会话历史：置顶的排在最前，其余按时间从新到旧。
 
-    只列出磁盘上真正存在的存档；新开但还没发言的会话不会出现在列表里
-    （空对话不落盘，所以"有文件"就等于"已经聊过"）。
+    只列出磁盘上真正存在的存档；新开但还没发言的会话不会出现（空对话不落盘）。
     """
     if not SESSIONS_DIR.exists():
         return []
-    return sorted((f.stem for f in SESSIONS_DIR.glob("*.json")), reverse=True)
+    names = [f.stem for f in SESSIONS_DIR.glob("*.json")]
+    # key 用字符串而非 datetime，省一次解析；会话 ID 是定长时间戳，字典序即时间序
+    return sorted(names, key=lambda n: (session_meta(n)["pinned"], n), reverse=True)
 
 
 def _safe_session_path(session_name: str) -> Path:
@@ -182,8 +249,9 @@ def load_selected_session(session_name: str) -> None:
         st.session_state.message = session_data.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
             st.session_state[key] = session_data.get(key) or default
-        # 会话名称存在存档里；老存档没这个字段就回退成会话 ID
+        # 会话名称与置顶状态存在存档里；老存档没这些字段就回退成默认值
         st.session_state.session_title = (session_data.get("title") or "").strip() or session_name
+        st.session_state.session_pinned = bool(session_data.get("pinned"))
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
@@ -202,6 +270,7 @@ def new_session() -> None:
     reset_profile()
     st.session_state.current_session = new_session_id()
     st.session_state.session_title = DEFAULT_SESSION_TITLE
+    st.session_state.session_pinned = False
     save_session()
 
 
@@ -465,6 +534,9 @@ with st.sidebar:
 
     st.divider()
 
+    # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）
+    st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
+
     # 会话名称：与存档文件名（会话 ID）解耦，改名不会新建/移动文件
     # 注意：控件 key 直接占用 "session_title"，所以只能在回调里改这个键
     st.text_input(
@@ -475,39 +547,67 @@ with st.sidebar:
         help="只影响显示，不会改变存档文件名（文件名始终是会话 ID 时间戳）。",
     )
 
-    # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）
-    st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
-
     st.subheader("会话历史")
     session_list = load_session_list()
     if not session_list:
         st.caption("还没有会话。发出第一条消息后，这里会出现本次会话。")
     for index, session in enumerate(session_list):
         current = session == st.session_state.current_session
+        meta = session_meta(session)
         # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致
-        label = st.session_state.session_title if current else session_title(session)
+        label = st.session_state.session_title if current else meta["title"]
+        pin_mark = "📌 " if meta["pinned"] else ""
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                f"{label}（当前）" if current else label,
+                f"{pin_mark}{label}（当前）" if current else f"{pin_mark}{label}",
                 width="stretch",
-                icon="📄",
                 key=f"session_{index}_{session}",
                 help=f"会话 ID：{session}",
                 type="primary" if current else "secondary",
                 on_click=lambda s=session: load_selected_session(s),
             )
         with col2:
-            # 删除前二次确认，避免误删存档（删除同样走回调）
-            with st.popover("❌", width="stretch"):
-                st.caption(f"确认删除会话\n\n`{label}` ？")
-                st.button(
-                    "确认删除",
-                    key=f"confirm_delete_{index}_{session}",
-                    width="stretch",
-                    type="primary",
-                    on_click=lambda s=session: delete_session(s),
+            # 一个入口搞定：重命名 / 置顶 / 删除
+            with st.popover("⋯", width="stretch", help="重命名、置顶或删除这个会话"):
+                # 重命名：输入框里改完按回车即生效。
+                # 必须用 on_change 回调：回调在控件实例化之前执行，这样改
+                # st.session_state['session_title'] 才是合法操作。
+                st.text_input(
+                    "重命名",
+                    value=label,
+                    key=f"rename_input_{index}_{session}",
+                    on_change=rename_session,
+                    args=(session,),
+                    kwargs={"new_title": None, "input_key": f"rename_input_{index}_{session}"},
                 )
+                if meta["pinned"]:
+                    st.button(
+                        "取消置顶",
+                        key=f"unpin_{index}_{session}",
+                        width="stretch",
+                        icon="📌",
+                        on_click=lambda s=session: set_pinned(s, False),
+                    )
+                else:
+                    st.button(
+                        "置顶",
+                        key=f"pin_{index}_{session}",
+                        width="stretch",
+                        icon="📌",
+                        on_click=lambda s=session: set_pinned(s, True),
+                    )
+                with st.popover("删除会话", icon="🗑️", width="stretch", type="primary"):
+                    st.button(
+                        "确认删除",
+                        key=f"confirm_delete_{index}_{session}",
+                        width="stretch",
+                        type="primary",
+                        icon="✖",
+                        on_click=lambda s=session: delete_session(s),
+                    )
+
+
     st.divider()
 
     # 角色管理：控件 key 直接就是状态键，不需要手工回写（回写会在控件实例化后

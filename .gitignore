@@ -10,7 +10,7 @@ __pycache__/
 
 # 用户对话存档（属于个人数据，不入库）
 sessions/*.json
-sessions/*.json.tmp
+sessions/*.tmp*
 
 # 测试运行时的临时文件
 tests/.tmp/

@@ -185,6 +185,11 @@ for _f in sessions_dir.glob("*.json"):
 for _name, _text in SESSION_BACKUP.items():
     (sessions_dir / _name).write_text(_text, encoding="utf-8")
 
+# --------------------------------------------------------------------------- #
+# D. 会话条目的操作入口（置顶 / 重命名 / 删除）渲染检查放在 tests/test_row_render.py：
+#    那个文件在唯一一次渲染之前就把存档准备好，所以会话条目会真的渲染出来。
+# --------------------------------------------------------------------------- #
+
 print()
 print("FAILURES:", failures if failures else "none")
 sys.exit(1 if failures else 0)
