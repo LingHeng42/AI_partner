@@ -99,6 +99,9 @@ wrapper = write_wrapper(
 
 # --------------------------------------------------------------------------- #
 # A. 页面渲染
+#     注意：一个测试进程里只有第一次 AppTest 运行会真正执行应用脚本，之后的
+#     运行会复用 sys.modules 里已缓存的 AI_partner（脚本主体被跳过），所以
+#     所有针对完整页面的断言都必须挂在这一段上。
 # --------------------------------------------------------------------------- #
 at = AppTest.from_file(str(wrapper), default_timeout=60).run()
 import _fake_openai  # noqa: E402  脚本执行时已导入，这里拿到同一个模块对象
@@ -122,7 +125,12 @@ check("高级配置默认折叠", advanced and advanced[0].proto.expanded is Fal
 check("会话历史分区存在", any(s.value == "会话历史" for s in at.subheader), [s.value for s in at.subheader])
 check("管理角色分区存在", any(s.value == "管理角色" for s in at.subheader), [s.value for s in at.subheader])
 check("生成参数分区存在", any(s.value == "生成参数" for s in at.subheader), [s.value for s in at.subheader])
+sessions_dir = PROJECT / "sessions"
 check("主区域不再显示会话 ID", not any("当前会话：" in c.value for c in at.caption), [c.value for c in at.caption][:3])
+check("启动时历史里就有当前会话（未落盘也显示）",
+      any("（当前）" in b.label for b in at.button), [b.label for b in at.button])
+check("启动阶段不创建空存档", not list(sessions_dir.glob("*.json")),
+      [f.name for f in sessions_dir.glob("*.json")])
 check("启动阶段未发起任何模型请求", _fake_openai.STATE["calls"] == [])
 
 # --------------------------------------------------------------------------- #
@@ -133,24 +141,23 @@ new_button = next((b for b in at.button if b.label == "新建会话"), None)
 check("找到新建会话按钮", new_button is not None)
 if new_button is not None:
     before = at.session_state["current_session"]
-    new_button.click().run()  # 回调在控件实例化之前执行，这里正是原报错的路径
+    # .run() 返回的是新的 AppTest（旧对象的元素树不会被更新），必须接住它
+    at = new_button.click().run()
     check("点击新建会话不抛异常", not at.exception, [e.message for e in at.exception] or "")
     check("新建会话后换新 ID", at.session_state["current_session"] != before, at.session_state["current_session"])
     check("新建会话后名称回到默认", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
     check("新建会话后对话清空", at.session_state["message"] == [], at.session_state["message"])
+    check("新建会话不会创建空存档", not list(sessions_dir.glob("*.json")),
+          [f.name for f in sessions_dir.glob("*.json")])
+for leftover in sessions_dir.glob("*.json"):
+    leftover.unlink()
 
 # --------------------------------------------------------------------------- #
-# C. 缺少 API Key 时给出可读提示，而不是 SDK 堆栈
-#    该分支在 tests/test_logic.py 里通过 require_api_key() 直接断言，
-#    这里只确认页面不会以异常形式炸掉。
+# C. 缺少 API Key 的分支
+#     该分支由 tests/test_logic.py 直接调用 require_api_key() 断言（能真正拿到
+#     st.error / st.stop 的调用记录）。这里不再重复，因为同一进程里 AI_partner
+#     已被缓存，包装脚本的 import 不会重新执行，跑出来的结果是假的。
 # --------------------------------------------------------------------------- #
-no_key_wrapper = write_wrapper(
-    "_no_key_wrapper.py",
-    "os.environ.pop('DEEPSEEK_API_KEY', None)\n"
-    "import AI_partner\n",
-)
-at_no_key = AppTest.from_file(str(no_key_wrapper), default_timeout=60).run()
-check("缺 Key 时不抛 SDK 堆栈", not at_no_key.exception, str(at_no_key.exception))
 
 print()
 print("FAILURES:", failures if failures else "none")

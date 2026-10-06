@@ -114,8 +114,14 @@ def reset_profile() -> None:
 
 
 def save_session() -> None:
-    """把当前会话原子写入 sessions/<会话ID>.json，写一半崩溃也不会损坏旧存档。"""
+    """把当前会话原子写入 sessions/<会话ID>.json，写一半崩溃也不会损坏旧存档。
+
+    空对话（还没有任何消息）不落盘：否则每次新建会话都会留下一个空档案，
+    历史里会出现两条同名记录。
+    """
     if not st.session_state.get("current_session"):
+        return
+    if not st.session_state.get("message"):
         return
     session_data = {
         "title": st.session_state.get("session_title", ""),
@@ -137,12 +143,15 @@ def save_session() -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
-def load_session_list() -> list:
-    """会话名本身就是可排序时间戳，直接倒序，不依赖 os.listdir 的返回顺序。"""
-    if not SESSIONS_DIR.exists():
-        return []
-    names = [f.stem for f in SESSIONS_DIR.glob("*.json")]
-    return sorted(names, reverse=True)
+def build_session_list() -> list:
+    """历史会话（新→旧）；当前会话还没落盘（新开、未发言）时把它排在第一位。"""
+    names = []
+    if SESSIONS_DIR.exists():
+        names = sorted((f.stem for f in SESSIONS_DIR.glob("*.json")), reverse=True)
+    current = st.session_state.get("current_session")
+    if current and current not in names:
+        names.insert(0, current)
+    return names
 
 
 def _safe_session_path(session_name: str) -> Path:
@@ -411,11 +420,11 @@ if "current_session" not in st.session_state:
 client = get_client(require_api_key())
 
 # logo（文件缺失时不影响页面）
-if LOGO_PATH.exists():
-    try:
-        st.logo(str(LOGO_PATH), size="large")
-    except Exception:  # noqa: BLE001 - 老版本 streamlit 没有 st.logo
-        pass
+# if LOGO_PATH.exists():
+#     try:
+#         st.logo(str(LOGO_PATH), size="large")
+#     except Exception:  # noqa: BLE001 - 老版本 streamlit 没有 st.logo
+#         pass
 
 # 展示历史对话（开启过深度思考的回答会带上可折叠的思考过程）
 render_history()
@@ -452,20 +461,22 @@ with st.sidebar:
     st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
 
     st.subheader("会话历史")
-    session_list = load_session_list()
+    session_list = build_session_list()
     if not session_list:
         st.caption("还没有保存的会话。")
     for index, session in enumerate(session_list):
-        label = session_title(session)
+        current = session == st.session_state.current_session
+        # 新开、还没发言的会话尚未落盘，标题先回退成会话 ID
+        label = st.session_state.session_title if current else session_title(session)
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                label,
+                f"{label}（当前）" if current else label,
                 width="stretch",
                 icon="📄",
                 key=f"session_{index}_{session}",
-                help=session,
-                type="primary" if session == st.session_state.current_session else "secondary",
+                help=f"会话 ID：{session}",
+                type="primary" if current else "secondary",
                 on_click=lambda s=session: load_selected_session(s),
             )
         with col2:
