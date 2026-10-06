@@ -30,40 +30,46 @@ TMP_DIR = TESTS_DIR / ".tmp"
 SESSIONS_DIR = TMP_DIR / "sessions"
 
 
-def strip_deny_aces(path: Path) -> None:
-    """去掉目录上沙箱留下的拒绝删除 ACE（Windows）。"""
-    if os.name != "nt" or not path.exists():
-        return
+def _run(cmd: list) -> None:
     try:
-        subprocess.run(
-            ["icacls", str(path), "/remove:d", "Everyone"],
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
+        subprocess.run(cmd, capture_output=True, check=False, timeout=60)
     except Exception:  # noqa: BLE001 - 清理失败不该影响测试
         pass
 
 
-def reset_tmp() -> None:
-    """清空并重建临时目录（每次运行都从干净状态开始）。"""
-    strip_deny_aces(TMP_DIR)
-    shutil.rmtree(TMP_DIR, ignore_errors=True)
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+def strip_deny_aces(path: Path) -> None:
+    """去掉目录上沙箱留下的拒绝删除 ACE（Windows）。"""
+    if os.name == "nt" and path.exists():
+        _run(["icacls", str(path), "/remove:d", "Everyone"])
+
+
+def take_ownership(path: Path) -> None:
+    """把目录及子项的所有权收归当前用户（沙箱建的临时目录属于其它主体）。"""
+    if os.name == "nt" and path.exists():
+        _run(["takeown", "/f", str(path), "/r", "/d", "y"])
+        _run(["icacls", str(path), "/grant", f"{os.environ.get('USERNAME', '')}:(OI)(CI)F",
+              "/t", "/c"])
 
 
 def purge(path: Path) -> bool:
-    """尽力删除 path，返回是否已不存在。"""
+    """尽力彻底删除 path（先处理拒绝 ACL 与所有权），返回是否已不存在。"""
+    if not path.exists():
+        return True
     strip_deny_aces(path)
     shutil.rmtree(path, ignore_errors=True)
     if path.exists():
-        try:
-            subprocess.run(["cmd", "/c", "rmdir", "/s", "/q", str(path)],
-                           capture_output=True, check=False, timeout=60)
-        except Exception:  # noqa: BLE001
-            pass
+        take_ownership(path)
+        shutil.rmtree(path, ignore_errors=True)
+    if path.exists() and os.name == "nt":
+        _run(["cmd", "/c", "rmdir", "/s", "/q", str(path)])
     return not path.exists()
+
+
+def reset_tmp() -> None:
+    """清空并重建临时目录（每次运行都从干净状态开始）。"""
+    purge(TMP_DIR)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # 干净起点 + 环境变量 + 路径
