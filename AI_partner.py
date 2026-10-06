@@ -143,15 +143,15 @@ def save_session() -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
-def build_session_list() -> list:
-    """历史会话（新→旧）；当前会话还没落盘（新开、未发言）时把它排在第一位。"""
-    names = []
-    if SESSIONS_DIR.exists():
-        names = sorted((f.stem for f in SESSIONS_DIR.glob("*.json")), reverse=True)
-    current = st.session_state.get("current_session")
-    if current and current not in names:
-        names.insert(0, current)
-    return names
+def load_session_list() -> list:
+    """会话历史（新→旧）。
+
+    只列出磁盘上真正存在的存档；新开但还没发言的会话不会出现在列表里
+    （空对话不落盘，所以"有文件"就等于"已经聊过"）。
+    """
+    if not SESSIONS_DIR.exists():
+        return []
+    return sorted((f.stem for f in SESSIONS_DIR.glob("*.json")), reverse=True)
 
 
 def _safe_session_path(session_name: str) -> Path:
@@ -427,6 +427,7 @@ client = get_client(require_api_key())
 #         pass
 
 # 展示历史对话（开启过深度思考的回答会带上可折叠的思考过程）
+st.header(st.session_state.session_title)
 render_history()
 
 # --------------------------------------------------------------------------- #
@@ -461,12 +462,12 @@ with st.sidebar:
     st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
 
     st.subheader("会话历史")
-    session_list = build_session_list()
+    session_list = load_session_list()
     if not session_list:
-        st.caption("还没有保存的会话。")
+        st.caption("还没有会话。发出第一条消息后，这里会出现本次会话。")
     for index, session in enumerate(session_list):
         current = session == st.session_state.current_session
-        # 新开、还没发言的会话尚未落盘，标题先回退成会话 ID
+        # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致
         label = st.session_state.session_title if current else session_title(session)
         col1, col2 = st.columns([4, 1])
         with col1:

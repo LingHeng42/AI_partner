@@ -256,7 +256,7 @@ data = json.loads(saved.read_text(encoding="utf-8"))
 check("存档字段 = 会话名称 + 四大人设 + message", set(data) == set(app.PROFILE_KEYS) | {"message", "title"}, sorted(data))
 check("存档文件名始终是会话 ID", saved.name == "2026-01-01_120000_000.json", saved.name)
 check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
-check("会话列表按时间倒序", app.build_session_list() == ["2026-01-01_120000_000"], app.build_session_list())
+check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 # 自定义名称：显示用名称与文件名解耦
 check("会话名称被写入存档", data["title"] == "第一次聊天", data.get("title"))
@@ -283,18 +283,16 @@ blank_title.write_text(json.dumps({"title": "  "}), encoding="utf-8")
 check("空 title 也回退成会话 ID", app.session_title("3000-01-01_000000_000") == "3000-01-01_000000_000",
       app.session_title("3000-01-01_000000_000"))
 check("不存在的会话名回退成自身", app.session_title("no-such-session") == "no-such-session")
-# 当前会话是 2000-01-01...（上一步 load 进来的），它已在磁盘上，因此不重复插入
-check("多会话按时间倒序", app.build_session_list() == ["3000-01-01_000000_000", "2026-01-01_120000_000", "2000-01-01_000000_000"],
-      app.build_session_list())
+# 当前会话在磁盘上，因此正常出现在列表里
+check("多会话按时间倒序", app.load_session_list() == ["3000-01-01_000000_000", "2026-01-01_120000_000", "2000-01-01_000000_000"],
+      app.load_session_list())
 blank_title.unlink()
 
-# 当前会话尚未落盘（新开、未发言）时，也要出现在列表首位
+# 新开、还没发言的会话（没有文件）不应出现在会话历史里
 app.st.session_state["current_session"] = "2999-12-31_235959_999"
-check("未落盘的新会话出现在列表首位",
-      app.build_session_list() == ["2999-12-31_235959_999", "2026-01-01_120000_000", "2000-01-01_000000_000"],
-      app.build_session_list())
-check("未落盘的新会话不会重复出现",
-      app.build_session_list().count("2999-12-31_235959_999") == 1)
+check("未落盘的新会话不出现在会话历史里",
+      app.load_session_list() == ["2026-01-01_120000_000", "2000-01-01_000000_000"],
+      app.load_session_list())
 check("未落盘的新会话没有文件", not (tmp / "2999-12-31_235959_999.json").exists())
 
 check("合法会话名可解析", app._safe_session_path("2026-01-01_120000_000").name == "2026-01-01_120000_000.json")
@@ -532,17 +530,17 @@ app.st.session_state["session_title"] = "旧名字"
 app.save_session()
 check("空对话不落盘", list(tmp.glob("*.json")) == [], [f.name for f in tmp.glob("*.json")])
 
-# 模拟首次启动：只有内存里的会话，磁盘上没有
-check("未落盘的会话出现在历史列表", app.build_session_list() == ["2026-01-01_120000_000"], app.build_session_list())
+# 模拟首次启动：只有内存里的会话，磁盘上没有 → 不应出现在会话历史里
+check("未落盘的会话不出现在会话历史", app.load_session_list() == [], app.load_session_list())
 
 # 第一次真正发言
 app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
 app.render_reply(_Sink())
 check("首次发言只产生一个存档", len(list(tmp.glob("*.json"))) == 1, [f.name for f in tmp.glob("*.json")])
 check("该存档就是当前会话", (tmp / "2026-01-01_120000_000.json").exists())
-check("首次发言后历史里只有一条", app.build_session_list() == ["2026-01-01_120000_000"], app.build_session_list())
+check("产生对话后才出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
-# 新建会话：旧档保留，新会话在发言前不落盘
+# 新建会话：旧档保留，新会话在发言前不落盘、也不出现在列表里
 app.st.session_state["session_title"] = "旧名字"
 app.new_session()
 new_id = app.st.session_state["current_session"]
@@ -551,8 +549,7 @@ check("新建会话后名称回到默认", app.st.session_state["session_title"]
 check("新建会话后对话清空", app.st.session_state["message"] == [])
 check("旧会话仍保留在磁盘", (tmp / "2026-01-01_120000_000.json").exists())
 check("新会话发言前不落盘", not (tmp / f"{new_id}.json").exists())
-check("历史列表里新会话在最前", app.build_session_list()[0] == new_id, app.build_session_list())
-check("历史列表长度仍为 2", app.build_session_list() == [new_id, "2026-01-01_120000_000"], app.build_session_list())
+check("新会话发言前不出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 # 再次新建（连续点两次按钮）不应该产生任何空档
 import time as _time
@@ -562,8 +559,14 @@ second_id = app.st.session_state["current_session"]
 check("连续新建会话不产生空档", list(tmp.glob("*.json")) == [tmp / "2026-01-01_120000_000.json"],
       [f.name for f in tmp.glob("*.json")])
 check("连续新建会话得到不同 ID", second_id != new_id)
-check("两个未落盘会话只保留当前一个", app.build_session_list() == [second_id, "2026-01-01_120000_000"],
-      app.build_session_list())
+check("连续新建后会话历史仍只有已保存的那条", app.load_session_list() == ["2026-01-01_120000_000"],
+      app.load_session_list())
+
+# 第二个会话发言后，历史里就有两条了
+app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
+app.render_reply(_Sink())
+check("第二个会话发言后历史有两条", app.load_session_list() == [second_id, "2026-01-01_120000_000"],
+      app.load_session_list())
 
 app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
                              "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})

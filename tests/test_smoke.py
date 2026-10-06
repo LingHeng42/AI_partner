@@ -103,6 +103,13 @@ wrapper = write_wrapper(
 #     运行会复用 sys.modules 里已缓存的 AI_partner（脚本主体被跳过），所以
 #     所有针对完整页面的断言都必须挂在这一段上。
 # --------------------------------------------------------------------------- #
+SESSION_BACKUP = {}
+sessions_dir = PROJECT / "sessions"
+sessions_dir.mkdir(exist_ok=True)
+for _f in sessions_dir.glob("*.json"):  # 先备份真实存档，测试结束后还原
+    SESSION_BACKUP[_f.name] = _f.read_text(encoding="utf-8")
+    _f.unlink()
+
 at = AppTest.from_file(str(wrapper), default_timeout=60).run()
 import _fake_openai  # noqa: E402  脚本执行时已导入，这里拿到同一个模块对象
 
@@ -127,8 +134,10 @@ check("管理角色分区存在", any(s.value == "管理角色" for s in at.subh
 check("生成参数分区存在", any(s.value == "生成参数" for s in at.subheader), [s.value for s in at.subheader])
 sessions_dir = PROJECT / "sessions"
 check("主区域不再显示会话 ID", not any("当前会话：" in c.value for c in at.caption), [c.value for c in at.caption][:3])
-check("启动时历史里就有当前会话（未落盘也显示）",
-      any("（当前）" in b.label for b in at.button), [b.label for b in at.button])
+check("没有对话时不显示会话条目",
+      not any("（当前）" in b.label for b in at.button), [b.label for b in at.button])
+check("空会话给出会话历史提示",
+      any("还没有会话" in c.value for c in at.caption), [c.value for c in at.caption])
 check("启动阶段不创建空存档", not list(sessions_dir.glob("*.json")),
       [f.name for f in sessions_dir.glob("*.json")])
 check("启动阶段未发起任何模型请求", _fake_openai.STATE["calls"] == [])
@@ -158,6 +167,12 @@ for leftover in sessions_dir.glob("*.json"):
 #     st.error / st.stop 的调用记录）。这里不再重复，因为同一进程里 AI_partner
 #     已被缓存，包装脚本的 import 不会重新执行，跑出来的结果是假的。
 # --------------------------------------------------------------------------- #
+
+# 还原测试前备份的真实存档
+for _f in sessions_dir.glob("*.json"):
+    _f.unlink()
+for _name, _text in SESSION_BACKUP.items():
+    (sessions_dir / _name).write_text(_text, encoding="utf-8")
 
 print()
 print("FAILURES:", failures if failures else "none")
