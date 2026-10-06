@@ -1,8 +1,9 @@
-"""会话条目渲染检查：置顶标记与 col2 的「置顶 / 重命名 / 删除」操作菜单。
+"""会话条目渲染检查：置顶标记与 col2 的「重命名 / 置顶 / 删除」操作菜单。
 
-为什么单独一个文件：AppTest 在同一进程里只有第一次运行会真正执行应用脚本
-（之后 import 命中 sys.modules 缓存），而"会话条目"要求渲染前磁盘上就已经有存档。
-所以这里把存档准备好之后再做那唯一一次渲染。
+两条硬性约束（都是踩过坑之后加的）：
+1. 存档目录用 AI_PARTNER_SESSIONS_DIR 指到临时目录 —— 测试绝不碰真实 sessions/。
+2. AppTest 在同一进程里只有第一次运行会真正执行应用脚本，所以先把存档准备好，
+   再做那唯一一次渲染。
 
 运行：
     .venv\\Scripts\\python.exe tests\\test_row_render.py
@@ -14,19 +15,22 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
 TMP_DIR = Path(__file__).resolve().parent / ".tmp" / f"row_{os.getpid()}"
+FAKE_SESSIONS = TMP_DIR / "sessions"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+FAKE_SESSIONS.mkdir(parents=True, exist_ok=True)
 sys.dont_write_bytecode = True
 
 os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
 os.environ["DEEPSEEK_API_KEY"] = "sk-test-not-used"
+# 关键：把应用的存档目录隔离到临时目录，测试不再读写真实 sessions/
+os.environ["AI_PARTNER_SESSIONS_DIR"] = str(FAKE_SESSIONS)
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(TMP_DIR))
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
-SESSIONS_DIR = PROJECT / "sessions"
 SESSION_ID = "2099-09-09_000000_000"
 failures = []
 
@@ -68,93 +72,86 @@ wrapper.write_text(
     f"sys.path.insert(0, {str(PROJECT).replace(chr(92), '/')!r})\n"
     f"sys.path.insert(0, {str(TMP_DIR).replace(chr(92), '/')!r})\n"
     "os.environ['DEEPSEEK_API_KEY'] = 'sk-test-not-used'\n"
+    f"os.environ['AI_PARTNER_SESSIONS_DIR'] = {str(FAKE_SESSIONS).replace(chr(92), '/')!r}\n"
     "import _fake_openai\n"
     "import streamlit as st\n"
-    # 关键：AppTest 每次都是全新的空 session_state，所以状态必须在脚本里、
-    # 且在应用开始渲染之前种下（此后 setdefault 会保留这些值）
     f"st.session_state['current_session'] = {SESSION_ID!r}\n"
     "st.session_state['message'] = [{'role': 'user', 'content': '第一条'}]\n"
     "import AI_partner\n"
-    # 标记脚本确实执行过（Streamlit 运行器会复用已缓存的模块）
-    "st.session_state['_row_render_ran'] = True\n"
-    "st.session_state['_dbg_after_import'] = repr(st.session_state.get('current_session'))\n",
+    "st.session_state['_row_render_ran'] = True\n",
     encoding="utf-8",
 )
 
 # --------------------------------------------------------------------------- #
-# 准备：备份真实存档，写入一条已置顶的测试会话
+# 准备一条已置顶的测试会话（写在隔离目录里）
 # --------------------------------------------------------------------------- #
-backup = {}
-SESSIONS_DIR.mkdir(exist_ok=True)
-for path in SESSIONS_DIR.glob("*.json"):
-    backup[path.name] = path.read_text(encoding="utf-8")
-    path.unlink()
+for stale in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
+    stale.unlink()
+(FAKE_SESSIONS / f"{SESSION_ID}.json").write_text(
+    json.dumps(
+        {
+            "title": "渲染检查会话",
+            "pinned": True,
+            "message": [{"role": "user", "content": "历史消息"}],
+            "nickname": "溟月",
+            "nature": "测试性格",
+            "role_description": "测试简介",
+            "output_rules": "测试规则",
+        },
+        ensure_ascii=False,
+    ),
+    encoding="utf-8",
+)
 
-try:
-    (SESSIONS_DIR / f"{SESSION_ID}.json").write_text(
-        json.dumps(
-            {
-                "title": "渲染检查会话",
-                "pinned": True,
-                "message": [{"role": "user", "content": "历史消息"}],
-                "nickname": "溟月",
-                "nature": "测试性格",
-                "role_description": "测试简介",
-                "output_rules": "测试规则",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+# --------------------------------------------------------------------------- #
+# 唯一一次真正执行应用脚本的渲染
+# --------------------------------------------------------------------------- #
+at = AppTest.from_file(str(wrapper), default_timeout=60).run()
+buttons = [b.label for b in at.button]
+text_inputs = [t.label for t in at.text_input]
 
-    # ----------------------------------------------------------------------- #
-    # 唯一一次真正执行应用脚本的渲染
-    # ----------------------------------------------------------------------- #
-    at = AppTest.from_file(str(wrapper), default_timeout=60).run()
-    buttons = [b.label for b in at.button]
-    text_inputs = [t.label for t in at.text_input]
+check("页面无异常启动", not at.exception, str(at.exception))
+check("应用脚本确实被执行（未被模块缓存跳过）", at.session_state.get("_row_render_ran") is True)
+check("会话条目带置顶标记 📌", any("📌" in label for label in buttons), buttons)
+check("会话条目显示自定义名称", any("渲染检查会话" in label for label in buttons), buttons)
+check("操作菜单里是「取消置顶」（已置顶）", any(label == "取消置顶" for label in buttons), buttons)
+check("操作菜单里含重命名输入框", "重命名" in text_inputs, text_inputs)
+check("重命名不再有保存按钮（改为回车生效）", not any("保存名称" in label for label in buttons), buttons)
+check("操作菜单里含删除确认", any("确认删除" in label for label in buttons), buttons)
+check("会话名称输入框仍在", "会话名称" in text_inputs, text_inputs)
 
-    check("页面无异常启动", not at.exception, str(at.exception))
-    check("应用脚本确实被执行（未被模块缓存跳过）",
-          at.session_state.get("_row_render_ran") is True)
-    # 注：这里不断言「（当前）」标记。AppTest 复用了自己的 SessionState 对象，
-    # 应用在渲染期间通过属性访问看到的是另一个会话 ID，这个标记在本环境下
-    # 观测不到（真实浏览器里正常）——宁可不测，也不要写一条假通过的断言。
-    check("会话条目带置顶标记 📌", any("📌" in label for label in buttons), buttons)
-    check("会话条目显示自定义名称", any("渲染检查会话" in label for label in buttons), buttons)
-    check("操作菜单里是「取消置顶」（已置顶）",
-          any(label == "取消置顶" for label in buttons), buttons)
-    check("操作菜单里含重命名输入框", "重命名" in text_inputs, text_inputs)
-    check("重命名不再有保存按钮（改为回车生效）",
-          not any("保存名称" in label for label in buttons), buttons)
-    check("操作菜单里含删除确认", any("确认删除" in label for label in buttons), buttons)
-    check("会话名称输入框仍在", "会话名称" in text_inputs, text_inputs)
-    check("会话条目显示的名称来自存档", any("渲染检查会话" in label for label in buttons), buttons)
-
-    # ----------------------------------------------------------------------- #
-    # 在原报错路径上验证：在重命名输入框里改完按回车（set_value + run 等价于回车提交）
-    # 之前这里会抛 StreamlitWidgetAlreadyInstantiatedError
-    # ----------------------------------------------------------------------- #
-    rename_box = next((t for t in at.text_input if t.label == "重命名"), None)
-    check("找到重命名输入框", rename_box is not None)
-    if rename_box is not None:
-        rename_box.set_value("改名后的会话")
-        after = at.run()
-        errors = [e.message for e in after.exception]
-        check("回车重命名不抛异常", not errors, errors)
-        check("回车重命名写入存档",
-              json.loads((SESSIONS_DIR / f"{SESSION_ID}.json").read_text(encoding="utf-8"))["title"] == "改名后的会话",
-              json.loads((SESSIONS_DIR / f"{SESSION_ID}.json").read_text(encoding="utf-8")).get("title"))
-        check("回车重命名同步了会话名称状态",
+# --------------------------------------------------------------------------- #
+# 在原报错路径上验证：重命名输入框里改完按回车（set_value + run 等价于回车提交）
+# --------------------------------------------------------------------------- #
+rename_box = next((t for t in at.text_input if t.label == "重命名"), None)
+check("找到重命名输入框", rename_box is not None)
+if rename_box is not None:
+    rename_box.set_value("改名后的会话")
+    after = at.run()
+    errors = [e.message for e in after.exception]
+    check("回车重命名不抛异常", not errors, errors)
+    saved = json.loads((FAKE_SESSIONS / f"{SESSION_ID}.json").read_text(encoding="utf-8"))
+    check("回车重命名写入存档", saved["title"] == "改名后的会话", saved.get("title"))
+    check("回车重命名同步了会话名称状态",
           after.session_state["session_title"] == "改名后的会话",
           after.session_state["session_title"])
     check("重命名不留下临时文件",
-          not list(SESSIONS_DIR.glob("*.tmp*")), [p.name for p in SESSIONS_DIR.glob("*.tmp*")])
-finally:
-    for path in list(SESSIONS_DIR.glob("*.json")) + list(SESSIONS_DIR.glob("*.tmp*")):
-        path.unlink()
-    for name, text in backup.items():
-        (SESSIONS_DIR / name).write_text(text, encoding="utf-8")
+          not list(FAKE_SESSIONS.glob("*.tmp*")), [p.name for p in FAKE_SESSIONS.glob("*.tmp*")])
+
+# --------------------------------------------------------------------------- #
+# key 稳定性：组件 key 不得包含列表序号
+# （"删掉上面一条后，⋯ 弹层串到下一条会话"的根因就是 index 进了 key）
+# --------------------------------------------------------------------------- #
+source = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+sidebar_source = source.split("st.subheader(\"会话历史\")", 1)[-1].split("st.subheader(\"管理角色\")", 1)[0]
+check("侧边栏会话列表里不再出现 index 变量",
+      "index" not in sidebar_source, sidebar_source[:0] or "found index")
+check("组件 key 只由会话 ID 构成（不含序号）",
+      "{index}" not in sidebar_source and "_{index}" not in sidebar_source)
+
+# 清理隔离目录（真实 sessions/ 从未被触碰）
+for path in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
+    path.unlink()
 
 print()
 print("FAILURES:", failures if failures else "none")

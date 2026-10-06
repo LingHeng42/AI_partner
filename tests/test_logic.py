@@ -18,6 +18,8 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
+# 关键：把应用的存档目录隔离到临时目录，测试绝不读写真实 sessions/
+os.environ["AI_PARTNER_SESSIONS_DIR"] = str(TMP_DIR / "sessions")
 os.environ.setdefault("DEEPSEEK_API_KEY", "sk-test-not-used")
 
 failures = []
@@ -791,6 +793,11 @@ for fragment in app.DEFAULT_PROFILE["role_description"].split("，"):
     check(f"role_description 片段只出现一次 {fragment[:12]}", src.count(fragment) == 1, src.count(fragment))
 check("昵称字段已统一为 nickname", "nickname" in src and "nike_name" not in src)
 check("不再保留旧的迁移映射", "LEGACY_KEY_MAP" not in src)
+check("存档目录支持 AI_PARTNER_SESSIONS_DIR 隔离", "AI_PARTNER_SESSIONS_DIR" in src)
+# 会话列表的组件 key 不能带列表序号：删掉上面一条会整体上移，
+# 带序号会导致弹层展开状态/输入框内容串到下一条会话上
+sidebar_src = src.split('st.subheader("会话历史")', 1)[-1].split('st.subheader("管理角色")', 1)[0]
+check("会话列表组件 key 不含列表序号", "{index}" not in sidebar_src, sidebar_src[:40])
 check("使用 Path 解析脚本目录", "Path(__file__).resolve().parent" in src)
 check("os.replace 原子落盘", "os.replace" in src)
 

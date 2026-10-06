@@ -21,6 +21,10 @@ sys.dont_write_bytecode = True
 os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
+# 关键：把应用的存档目录隔离到临时目录，测试绝不读写真实 sessions/
+FAKE_SESSIONS = TMP_DIR / "sessions"
+FAKE_SESSIONS.mkdir(parents=True, exist_ok=True)
+os.environ["AI_PARTNER_SESSIONS_DIR"] = str(FAKE_SESSIONS)
 sys.path.insert(0, str(PROJECT))
 sys.path.insert(0, str(TMP_DIR))
 
@@ -107,12 +111,10 @@ wrapper = write_wrapper(
 #     注意：一个测试进程里只有第一次 AppTest 运行会真正执行应用脚本，之后的
 #     运行会复用 sys.modules 里已缓存的 AI_partner（脚本主体被跳过），所以
 #     所有针对完整页面的断言都必须挂在这一段上。
+#     存档目录已通过 AI_PARTNER_SESSIONS_DIR 隔离到 tests/.tmp，不碰真实数据。
 # --------------------------------------------------------------------------- #
-SESSION_BACKUP = {}
-sessions_dir = PROJECT / "sessions"
-sessions_dir.mkdir(exist_ok=True)
-for _f in sessions_dir.glob("*.json"):  # 先备份真实存档，测试结束后还原
-    SESSION_BACKUP[_f.name] = _f.read_text(encoding="utf-8")
+sessions_dir = FAKE_SESSIONS
+for _f in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
     _f.unlink()
 
 at = AppTest.from_file(str(wrapper), default_timeout=60).run()
@@ -179,11 +181,9 @@ for leftover in sessions_dir.glob("*.json"):
 #     已被缓存，包装脚本的 import 不会重新执行，跑出来的结果是假的。
 # --------------------------------------------------------------------------- #
 
-# 还原测试前备份的真实存档
-for _f in sessions_dir.glob("*.json"):
+# 清理隔离目录（真实 sessions/ 从未被触碰，也没有"备份-删除-还原"这种危险操作）
+for _f in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
     _f.unlink()
-for _name, _text in SESSION_BACKUP.items():
-    (sessions_dir / _name).write_text(_text, encoding="utf-8")
 
 # --------------------------------------------------------------------------- #
 # D. 会话条目的操作入口（置顶 / 重命名 / 删除）渲染检查放在 tests/test_row_render.py：

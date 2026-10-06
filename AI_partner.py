@@ -19,7 +19,11 @@ from openai import OpenAI
 # 路径：全部基于脚本自身位置解析，从任何工作目录启动都能找到 sessions/ 与 resources/
 # --------------------------------------------------------------------------- #
 BASE_DIR = Path(__file__).resolve().parent
-SESSIONS_DIR = BASE_DIR / "sessions"
+# 存档目录：默认 <项目>/sessions。测试用 AI_PARTNER_SESSIONS_DIR 指到临时目录，
+# 这样测试永远不会碰到真实存档（曾经因为测试清空真实目录而丢过用户数据）。
+SESSIONS_DIR = Path(
+    os.environ.get("AI_PARTNER_SESSIONS_DIR") or (BASE_DIR / "sessions")
+).expanduser()
 RESOURCES_DIR = BASE_DIR / "resources"
 LOGO_PATH = RESOURCES_DIR / "logo.png"
 
@@ -551,7 +555,7 @@ with st.sidebar:
     session_list = load_session_list()
     if not session_list:
         st.caption("还没有会话。发出第一条消息后，这里会出现本次会话。")
-    for index, session in enumerate(session_list):
+    for session in session_list:
         current = session == st.session_state.current_session
         meta = session_meta(session)
         # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致
@@ -562,29 +566,31 @@ with st.sidebar:
             st.button(
                 f"{pin_mark}{label}（当前）" if current else f"{pin_mark}{label}",
                 width="stretch",
-                key=f"session_{index}_{session}",
+                key=f"session_{session}",
                 help=f"会话 ID：{session}",
                 type="primary" if current else "secondary",
                 on_click=lambda s=session: load_selected_session(s),
             )
         with col2:
-            # 一个入口搞定：重命名 / 置顶 / 删除
-            with st.popover("⋯", width="stretch", help="重命名、置顶或删除这个会话"):
+            # 一个入口搞定：重命名 / 置顶 / 删除。
+            # key 一律只用会话 ID，不带列表序号：删掉上一条会整体上移，
+            # 带序号的话弹层展开状态和输入框内容会串到下一条会话上。
+            with st.popover("⋯", width="stretch", help="重命名、置顶或删除这个会话", key=f"menu_{session}"):
                 # 重命名：输入框里改完按回车即生效。
                 # 必须用 on_change 回调：回调在控件实例化之前执行，这样改
                 # st.session_state['session_title'] 才是合法操作。
                 st.text_input(
                     "重命名",
                     value=label,
-                    key=f"rename_input_{index}_{session}",
+                    key=f"rename_input_{session}",
                     on_change=rename_session,
                     args=(session,),
-                    kwargs={"new_title": None, "input_key": f"rename_input_{index}_{session}"},
+                    kwargs={"new_title": None, "input_key": f"rename_input_{session}"},
                 )
                 if meta["pinned"]:
                     st.button(
                         "取消置顶",
-                        key=f"unpin_{index}_{session}",
+                        key=f"unpin_{session}",
                         width="stretch",
                         icon="📌",
                         on_click=lambda s=session: set_pinned(s, False),
@@ -592,15 +598,21 @@ with st.sidebar:
                 else:
                     st.button(
                         "置顶",
-                        key=f"pin_{index}_{session}",
+                        key=f"pin_{session}",
                         width="stretch",
                         icon="📌",
                         on_click=lambda s=session: set_pinned(s, True),
                     )
-                with st.popover("删除会话", icon="🗑️", width="stretch", type="primary"):
+                with st.popover(
+                    "删除会话",
+                    icon="🗑️",
+                    width="stretch",
+                    type="primary",
+                    key=f"delete_menu_{session}",
+                ):
                     st.button(
                         "确认删除",
-                        key=f"confirm_delete_{index}_{session}",
+                        key=f"confirm_delete_{session}",
                         width="stretch",
                         type="primary",
                         icon="✖",
