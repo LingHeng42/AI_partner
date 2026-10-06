@@ -161,6 +161,17 @@ def _safe_session_path(session_name: str) -> Path:
     return SESSIONS_DIR / f"{session_name}.json"
 
 
+def session_file_exists(session_name: str = None) -> bool:
+    """当前会话是否已有存档文件（= 侧边栏会话历史里能否列出它）。"""
+    name = session_name or st.session_state.get("current_session")
+    if not name:
+        return False
+    try:
+        return _safe_session_path(name).exists()
+    except ValueError:
+        return False
+
+
 def load_selected_session(session_name: str) -> None:
     try:
         path = _safe_session_path(session_name)
@@ -377,7 +388,13 @@ def render_reply(placeholder) -> None:
     else:
         st.warning("模型没有返回任何内容，本次回答未记录。")
 
+    existed = session_file_exists()
     save_session()
+    if not existed and session_file_exists():
+        # 本次是这条会话的第一个存档：侧边栏是在本轮脚本顶部渲染的，那时文件还
+        # 不存在，所以必须主动重跑一次，会话才会立刻出现在会话历史里。
+        # （不能只依赖 chat_input 提交后浏览器的隐式重跑，实测它不保证发生。）
+        st.rerun()
 
 
 def render_history() -> None:

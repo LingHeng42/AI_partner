@@ -597,6 +597,62 @@ check("侧边栏会把它标记为当前会话", app.st.session_state["current_s
 check("它在历史里用的是自定义名称", app.session_title(auto_id) == "自动归档测试", app.session_title(auto_id))
 check("发言后历史里只有它一条", app.load_session_list() == [auto_id], app.load_session_list())
 
+# --------------------------------------------------------------------------- #
+# 侧边栏渲染顺序：侧边栏在脚本顶部渲染，那时新会话的文件可能还不存在，
+# 所以 render_reply 必须在"首次落盘"后主动重跑一次，否则会话不会出现在历史里。
+# 这里显式检查这个重跑确实被触发。
+# --------------------------------------------------------------------------- #
+reruns = _Recorder("rerun")
+app.st.rerun = reruns
+
+# 场景 1：全新会话的第一条消息 → 首次落盘 → 必须重跑
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app.st.session_state = _State()
+app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["thinking"] = False
+app.st.session_state["message"] = []
+app.st.session_state["current_session"] = "2099-04-04_000000_000"
+app.st.session_state["session_title"] = "首条消息"
+app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
+app.client = FakeClient(completions=FakeCompletions())
+app.render_reply(_Sink())
+check("新会话首次落盘后触发了重跑", len(reruns.calls) == 1, reruns.calls)
+check("重跑前会话已落盘", (tmp / "2099-04-04_000000_000.json").exists())
+
+# 场景 2：已存在的会话继续聊天 → 不需要重跑
+reruns.calls.clear()
+app.st.session_state["message"].append({"role": "assistant", "content": "你好"})
+app.st.session_state["message"].append({"role": "user", "content": "继续"})
+app.client = FakeClient(completions=FakeCompletions())
+app.render_reply(_Sink())
+check("已有存档的会话继续聊天不重跑", len(reruns.calls) == 0, reruns.calls)
+
+# 场景 3：全新会话 + 空回答 → 仍然会因为那条用户消息而首次落盘，所以要重跑一次
+reruns.calls.clear()
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app.st.session_state["current_session"] = "2099-04-05_000000_000"
+app.st.session_state["message"] = [{"role": "user", "content": "空回答"}]
+app.client = FakeClient(completions=FakeCompletions(empty=True))
+app.render_reply(_Sink())
+check("全新会话的空回答也会落盘（用户消息在）", (tmp / "2099-04-05_000000_000.json").exists())
+check("全新会话的空回答同样重跑一次", len(reruns.calls) == 1, reruns.calls)
+
+# 场景 4：完全没有消息 → 不落盘也不重跑
+reruns.calls.clear()
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app.st.session_state["current_session"] = "2099-04-06_000000_000"
+app.st.session_state["message"] = []
+app.render_reply(_Sink())
+check("无消息时不落盘", list(tmp.glob("*.json")) == [], [f.name for f in tmp.glob("*.json")])
+check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)
+
+app.st.rerun = _Sink()
+check("session_file_exists 能正确判断", app.session_file_exists("no-such") is False)
+
 app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
                              "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})
 app.reset_advanced()
