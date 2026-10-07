@@ -100,7 +100,8 @@ text_inputs = [t.label for t in at.text_input]
 
 check("页面无异常启动", not at.exception, str(at.exception))
 check("应用脚本确实被执行（未被模块缓存跳过）", at.session_state.get("_row_render_ran") is True)
-check("会话条目带置顶标记 📌", any("📌" in label for label in buttons), buttons)
+check("会话条目带置顶标记（Material 图标）",
+      any(":material/push_pin:" in label for label in buttons), buttons)
 check("会话条目显示自定义名称", any("渲染检查会话" in label for label in buttons), buttons)
 check("操作菜单里是「取消置顶」（已置顶）", any(label == "取消置顶" for label in buttons), buttons)
 check("操作菜单里含重命名输入框", "重命名" in text_inputs, text_inputs)

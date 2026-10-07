@@ -469,16 +469,6 @@ def apply_advanced(data: dict) -> None:
         st.session_state[key] = default if value is None else value
 
 
-def reset_advanced() -> None:
-    """恢复高级配置默认值。
-
-    必须作为 on_click 回调执行：这些键已被滑块/复选框控件占用，
-    在控件实例化之后再赋值会报 StreamlitWidgetAlreadyInstantiatedError。
-    """
-    for key, value in DEFAULT_ADVANCED.items():
-        st.session_state[key] = value
-
-
 def build_request_payload() -> dict:
     """按侧边栏的高级配置拼装请求参数，未启用的项不发送。"""
     payload = {
@@ -544,36 +534,45 @@ def reasoning_expander(key: str, state_key: str, expanded: bool):
 
 
 def render_reply(placeholder) -> None:
-    """请求模型，把流式推理渲染进折叠面板、正文渲染进气泡，最后写入历史并落盘。
+    """请求模型，把流式推理渲染进折叠面板、正文用 st.write_stream 渲染。
 
+    正文交给 st.write_stream（官方推荐的流式渲染方式）；推理片段在同一趟迭代里
+    顺带写进「思考过程」折叠面板，所以两种内容仍然是边收边显示。
     异常在这里被消化成 st.error，调用方（页面脚本）不再需要 try/except。
     """
-    reasoning, full_response = "", ""
+    reasoning = ""
+    full_response = ""  # 异常路径下也要有定义，后面才能安全判断
     thinking_enabled = bool(st.session_state.thinking)
     try:
         response = client.chat.completions.create(**build_request_payload())
+
+        def stream_body():
+            """边消费模型流边渲染：先出推理，再流式吐正文。"""
+            nonlocal reasoning
+            for chunk in response:
+                reasoning_piece, content_piece = _delta_text(chunk)
+                if reasoning_piece:
+                    reasoning += reasoning_piece
+                    if thinking_enabled:
+                        # 推理内容只更新占位符，不重建整条消息
+                        reasoning_text.markdown(reasoning + "▌")
+                if content_piece:
+                    if thinking_enabled and reasoning_text is not None:
+                        # 思考结束：撤掉"思考中"的微光提示，把完整推理定格
+                        reasoning_text.markdown(reasoning or "_（本次没有输出推理内容）_")
+                    yield content_piece
+
         with placeholder.chat_message("assistant"):
             reasoning_placeholder, reasoning_text = None, None
             if thinking_enabled:
                 reasoning_placeholder = reasoning_expander("reasoning_panel", "show_reasoning", True)
                 with reasoning_placeholder:
                     reasoning_text = st.empty()
-            message_placeholder = st.empty()
-            if thinking_enabled:
-                message_placeholder.markdown("_正在思考…_")
-            for chunk in response:
-                reasoning_piece, content_piece = _delta_text(chunk)
-                if reasoning_piece:
-                    reasoning += reasoning_piece
-                    if reasoning_placeholder is not None:
-                        reasoning_text.markdown(reasoning + "▌")
-                if content_piece:
-                    full_response += content_piece
-                    # 末尾补一个光标，让流式输出的边界可见；只更新占位符，不重建整条消息
-                    message_placeholder.markdown(full_response + "▌")
-            if reasoning_placeholder is not None:
-                reasoning_text.markdown(reasoning or "_（本次没有输出推理内容）_")
-            message_placeholder.markdown(full_response)
+                    # 官方推荐的进行中提示：微光文字本身就是状态指示
+                    reasoning_text.markdown(":shimmer[思考中…]")
+            # 正文渲染交给 st.write_stream（占位容器保留在聊天气泡里）。
+            # 没有产出时它返回空列表，统一成空字符串便于后续判断
+            full_response = st.write_stream(stream_body()) or ""
     except Exception as e:  # noqa: BLE001 - 网络/限流/余额等异常不该把页面打成 traceback
         placeholder.empty()
         st.error(f"请求模型失败：{e}")
@@ -612,7 +611,7 @@ def render_history() -> None:
 # --------------------------------------------------------------------------- #
 st.set_page_config(
     page_title="凌恒的酒馆",
-    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "🐳",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else ":material/local_bar:",
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
@@ -670,9 +669,8 @@ with st.sidebar:
     st.button(
         "新建会话",
         width="stretch",
-        icon="📝",
+        icon=":material/add_comment:",
         type="primary" if is_fresh_session() else "secondary",
-
         on_click=new_session,
     )
 
@@ -696,7 +694,7 @@ with st.sidebar:
         # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致。
         # 「是不是当前会话」由按钮颜色（type=primary）表示，名称里不再加"（当前）"
         label = st.session_state.session_title if current else meta["title"]
-        pin_mark = "📌 " if meta["pinned"] else ""
+        pin_mark = ":material/push_pin: " if meta["pinned"] else ""
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
@@ -728,7 +726,7 @@ with st.sidebar:
                         "取消置顶",
                         key=f"unpin_{session}",
                         width="stretch",
-                        icon="📌",
+                        icon=":material/push_pin:",
                         on_click=lambda s=session: set_pinned(s, False),
                     )
                 else:
@@ -736,12 +734,12 @@ with st.sidebar:
                         "置顶",
                         key=f"pin_{session}",
                         width="stretch",
-                        icon="📌",
+                        icon=":material/keep:",
                         on_click=lambda s=session: set_pinned(s, True),
                     )
                 with st.popover(
                     "删除会话",
-                    icon="🗑️",
+                    icon=":material/delete:",
                     width="stretch",
                     type="primary",
                     key=f"delete_menu_{session}",
@@ -751,7 +749,7 @@ with st.sidebar:
                         key=f"confirm_delete_{session}",
                         width="stretch",
                         type="primary",
-                        icon="✖",
+                        icon=":material/delete_forever:",
                         on_click=lambda s=session: delete_session(s),
                     )
 
@@ -828,7 +826,6 @@ with st.sidebar:
                 help="单次回答（不含思考过程）的长度上限。",
             )
         st.button("恢复默认值", width="stretch", on_click=reset_advanced_and_save)
-
 
 # --------------------------------------------------------------------------- #
 # 对话框

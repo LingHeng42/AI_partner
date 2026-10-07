@@ -43,6 +43,24 @@ class _Sink:
         return iter((_Sink(), _Sink()))
 
 
+_placeholder_log = []
+
+
+class _Placeholder(_Sink):
+    """模拟 st.empty() 返回的占位符：记录写进去的内容，便于断言中间态。"""
+
+    def __init__(self):
+        self.markdowns = []
+        _placeholder_log.append(self)
+
+    def markdown(self, body="", *args, **kwargs):
+        self.markdowns.append(body)
+        return self
+
+    def last(self):
+        return self.markdowns[-1] if self.markdowns else None
+
+
 class _Cache:
     def __call__(self, func=None, **kwargs):
         if func is None:
@@ -169,8 +187,19 @@ fake_st.stop = _Sink()
 fake_st.rerun = _Sink()
 for _name in ("header", "logo", "chat_message", "write", "title", "button", "columns",
               "subheader", "divider", "text_input", "text_area", "toggle", "chat_input",
-              "empty", "popover", "text"):
+              "popover", "text"):
     setattr(fake_st, _name, _Sink())
+# st.empty() 返回可记录内容的占位符，用于断言流式中间态（如"思考中"微光提示）
+fake_st.empty = lambda *a, **k: _Placeholder()
+
+
+def _fake_write_stream(stream, *args, **kwargs):
+    """模拟 st.write_stream：消费生成器并返回拼接后的文本（字符串流时如此）。"""
+    pieces = [piece for piece in stream if isinstance(piece, str)]
+    return "".join(pieces)
+
+
+fake_st.write_stream = _fake_write_stream
 # 逻辑测试不跑页面分支：让输入类控件返回 None（在 streamlit 里就是"没有输入"）
 fake_st.chat_input = lambda *a, **k: None
 fake_st.toggle = lambda *a, **k: None
@@ -450,7 +479,9 @@ reasoning_chunks = [
     chunk(text="在。"),
 ]
 app.client = FakeClient(completions=FakeCompletions(chunks=reasoning_chunks))
+_placeholder_log.clear()  # 只统计本次 render_reply 写入的内容
 app.render_reply(_Sink())
+placeholder_writes = [w for ph in _placeholder_log for w in ph.markdowns]
 
 reply = app.st.session_state.message[-1]
 check("推理内容被记录下来", reply.get("reasoning_content") == "先看他问的是什么。嗯，得用第一人称回答。", reply)
@@ -461,6 +492,11 @@ check("思考中自动展开过", blocks and True in blocks[0].states, blocks[0]
 check("流式结束后保持展开（不强制折叠）", blocks and blocks[0].expanded is True, blocks[0].states if blocks else None)
 check("思考面板带 key（用户手动开合会被记住）", blocks and blocks[0].key == "reasoning_panel",
       blocks[0].key if blocks else None)
+check("思考开始时显示微光提示",
+      any(":shimmer[思考中" in (v or "") for v in placeholder_writes), placeholder_writes[:3])
+check("推理开始后微光被真实推理替换",
+      any("先看他问的是什么。" in (v or "") for v in placeholder_writes), placeholder_writes)
+check("推理结束后不再有微光", ":shimmer" not in (placeholder_writes[-1] or ""), placeholder_writes[-1:])
 # 模拟用户手动折叠：on_change 回调把组件状态镜像到状态键
 app.st.session_state["reasoning_panel"] = False
 app._remember_expander("reasoning_panel", "show_reasoning")
@@ -874,7 +910,7 @@ app.st.rerun = _Sink()
 
 app.st.session_state.update({"temperature": 0.2, "top_p": 0.3, "limit_tokens": True,
                              "max_tokens": 512, "frequency_penalty": 1.0, "presence_penalty": -1.0})
-app.reset_advanced()
+app.reset_advanced_and_save()  # 「恢复默认值」按钮的回调（还原 + 落盘）
 for _key, _value in app.DEFAULT_ADVANCED.items():
     check(f"恢复默认值 {_key}", app.st.session_state[_key] == _value, app.st.session_state[_key])
 
