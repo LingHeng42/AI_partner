@@ -55,6 +55,12 @@ def purge(path: Path) -> bool:
     """尽力彻底删除 path（先处理拒绝 ACL 与所有权），返回是否已不存在。"""
     if not path.exists():
         return True
+    if path.is_dir():
+        try:
+            for child in path.iterdir():
+                strip_deny_aces(child)
+        except OSError:
+            pass
     strip_deny_aces(path)
     shutil.rmtree(path, ignore_errors=True)
     if path.exists():
@@ -67,6 +73,14 @@ def purge(path: Path) -> bool:
 
 def reset_tmp() -> None:
     """清空并重建临时目录（每次运行都从干净状态开始）。"""
+    # 逐个顶层子项先摘掉拒绝 ACE：整棵树里只要有沙箱建的目录，
+    # 直接从父目录删除就会连带失败
+    if TMP_DIR.exists():
+        try:
+            for child in TMP_DIR.iterdir():
+                strip_deny_aces(child)
+        except OSError:
+            pass
     purge(TMP_DIR)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

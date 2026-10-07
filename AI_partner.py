@@ -197,6 +197,7 @@ def reset_profile() -> None:
 def save_session() -> None:
     """把当前会话原子写入 sessions/<会话ID>.json，写一半崩溃也不会损坏旧存档。
 
+    一条存档 = 会话名称 + 置顶 + 消息 + 人设 + 高级生成参数。
     空对话（还没有任何消息）不落盘：否则每次新建会话都会留下一个空档案，
     历史里会出现两条同名记录。
     """
@@ -209,6 +210,8 @@ def save_session() -> None:
         "pinned": bool(st.session_state.get("session_pinned", False)),
         "message": st.session_state.message,
         **profile_from_state(),
+        # 高级生成参数跟着会话走：切回来还能保持这套温度/惩罚设置
+        **advanced_from_state(),
     }
     _write_json_atomic(SESSIONS_DIR / f"{st.session_state.current_session}.json", session_data)
 
@@ -253,6 +256,8 @@ def load_selected_session(session_name: str) -> None:
         st.session_state.message = session_data.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
             st.session_state[key] = session_data.get(key) or default
+        # 高级参数跟着会话走；老存档没这些字段就回退成默认值
+        apply_advanced(session_data)
         # 会话名称与置顶状态存在存档里；老存档没这些字段就回退成默认值
         st.session_state.session_title = (session_data.get("title") or "").strip() or session_name
         st.session_state.session_pinned = bool(session_data.get("pinned"))
@@ -261,6 +266,12 @@ def load_selected_session(session_name: str) -> None:
         st.error(f"加载会话失败: {e}")
         return
     st.rerun()  # 刷新页面
+
+
+def _reset_advanced() -> None:
+    """把高级生成参数恢复成默认值（新建/删除会话时用）。"""
+    for key, value in DEFAULT_ADVANCED.items():
+        st.session_state[key] = value
 
 
 def new_session() -> None:
@@ -272,6 +283,7 @@ def new_session() -> None:
     """
     save_session()
     reset_profile()
+    _reset_advanced()
     st.session_state.current_session = new_session_id()
     st.session_state.session_title = DEFAULT_SESSION_TITLE
     st.session_state.session_pinned = False
@@ -285,8 +297,10 @@ def delete_session(session_name: str) -> None:
             path.unlink()
         if session_name == st.session_state.current_session:
             reset_profile()
+            _reset_advanced()
             st.session_state.current_session = new_session_id()
             st.session_state.session_title = DEFAULT_SESSION_TITLE
+            st.session_state.session_pinned = False
     except Exception as e:  # noqa: BLE001
         st.error(f"删除会话失败: {e}")
         return
@@ -347,6 +361,22 @@ def build_messages() -> list:
 
 def advanced_value(name: str):
     return st.session_state.get(name, DEFAULT_ADVANCED[name])
+
+
+def advanced_from_state() -> dict:
+    """当前的高级生成参数快照（存进会话存档用）。"""
+    return {key: st.session_state.get(key, DEFAULT_ADVANCED[key]) for key in ADVANCED_KEYS}
+
+
+def apply_advanced(data: dict) -> None:
+    """用存档里的高级参数覆盖当前设置；缺失的键回退成默认值。
+
+    只能从回调里调用（回调先于控件实例化），否则改这些已被滑块占用的 key 会报
+    StreamlitWidgetAlreadyInstantiatedError。
+    """
+    for key, default in DEFAULT_ADVANCED.items():
+        value = data.get(key, default)
+        st.session_state[key] = default if value is None else value
 
 
 def reset_advanced() -> None:

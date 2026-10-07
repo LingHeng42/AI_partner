@@ -247,8 +247,9 @@ app.save_session()
 saved = tmp / "2026-01-01_120000_000.json"
 check("会话存档写入成功", saved.exists())
 data = json.loads(saved.read_text(encoding="utf-8"))
-check("存档字段 = 名称 + 置顶 + 四大人设 + message",
-      set(data) == set(app.PROFILE_KEYS) | {"message", "title", "pinned"}, sorted(data))
+check("存档字段 = 名称 + 置顶 + 四大人设 + 高级参数 + message",
+      set(data) == set(app.PROFILE_KEYS) | set(app.ADVANCED_KEYS) | {"message", "title", "pinned"},
+      sorted(data))
 check("存档文件名始终是会话 ID", saved.name == "2026-01-01_120000_000.json", saved.name)
 check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
 check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
@@ -269,6 +270,30 @@ check("读取会话恢复消息", app.st.session_state["message"] == [{"role": "
 check("读取会话恢复人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
 check("读取会话恢复名称", app.st.session_state["session_title"] == "第一次聊天", app.st.session_state["session_title"])
 
+# 高级生成参数随会话存档：调过之后再切回来，设置还在
+app.st.session_state.update({"temperature": 0.35, "top_p": 0.7, "limit_tokens": True,
+                            "max_tokens": 1024, "frequency_penalty": 0.5, "presence_penalty": -0.3})
+app.save_session()
+saved_advanced = json.loads(saved.read_text(encoding="utf-8"))
+check("高级参数写入存档", saved_advanced["temperature"] == 0.35 and saved_advanced["max_tokens"] == 1024,
+      {k: saved_advanced.get(k) for k in app.ADVANCED_KEYS})
+app._reset_advanced()
+check("重置后回到默认值", app.st.session_state["temperature"] == app.DEFAULT_ADVANCED["temperature"])
+app.load_selected_session("2026-01-01_120000_000")
+check("切回会话恢复温度", app.st.session_state["temperature"] == 0.35, app.st.session_state["temperature"])
+check("切回会话恢复 top_p", app.st.session_state["top_p"] == 0.7, app.st.session_state["top_p"])
+check("切回会话恢复惩罚项", app.st.session_state["frequency_penalty"] == 0.5)
+check("切回会话恢复 max_tokens", app.st.session_state["max_tokens"] == 1024)
+check("切回会话恢复长度开关", app.st.session_state["limit_tokens"] is True)
+# 改名/置顶走的是"读出来改字段再写回"，不能把高级参数弄丢
+app.rename_session("2026-01-01_120000_000", "改名后")
+after_rename = json.loads(saved.read_text(encoding="utf-8"))
+check("改名不影响已存的高级参数", after_rename["temperature"] == 0.35 and after_rename["max_tokens"] == 1024,
+      {k: after_rename.get(k) for k in app.ADVANCED_KEYS})
+app.set_pinned("2026-01-01_120000_000", True)
+after_pin = json.loads(saved.read_text(encoding="utf-8"))
+check("置顶不影响已存的高级参数", after_pin["temperature"] == 0.35, after_pin.get("temperature"))
+app.set_pinned("2026-01-01_120000_000", False)  # 还原，避免影响后面的排序断言
 # 只写了部分字段的存档：缺失项应回填默认值，名称回退成会话 ID
 partial = tmp / "2000-01-01_000000_000.json"
 partial.write_text(json.dumps({"message": [], "nickname": "旧昵称"}, ensure_ascii=False), encoding="utf-8")

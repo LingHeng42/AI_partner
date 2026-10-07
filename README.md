@@ -65,6 +65,7 @@ requirements.txt     依赖清单
 ```json
 {
   "title": "第一次聊天",
+  "pinned": false,
   "message": [
     {"role": "user", "content": "你好"},
     {"role": "assistant", "content": "我在。", "reasoning_content": "（开启深度思考时的推理过程）"}
@@ -72,13 +73,21 @@ requirements.txt     依赖清单
   "nickname": "溟月",
   "nature": "聪明但很懒，傲娇嘴甜，酷爱白米饭",
   "role_description": "溟月是一位拥有蓝色长发和蓝色眼睛的少女……",
-  "output_rules": "请以第一人称的口吻回答问题……"
+  "output_rules": "请以第一人称的口吻回答问题……",
+  "temperature": 1.0,
+  "top_p": 1.0,
+  "limit_tokens": false,
+  "max_tokens": 4096,
+  "frequency_penalty": 0.0,
+  "presence_penalty": 0.0
 }
 ```
 
 > - `title` 是**会话名称**（显示用），在侧边栏「会话名称」里改名只改这个字段，**不会重命名或移动 JSON 文件**；文件名始终是会话 ID。
 > - 没有 `title` 的老存档，显示时自动回退成会话 ID。
-> - 其余四个字段与 `AI_partner.py` 里的 `DEFAULT_PROFILE` 一一对应，字段缺失时按默认值回填；昵称字段名为 `nickname`（历史版本里的拼写错误 `nike_name` 已废弃）。
+> - `pinned` 为置顶标记，置顶的会话排在会话历史最前。
+> - 四大人设字段与 `AI_partner.py` 里的 `DEFAULT_PROFILE` 一一对应，字段缺失时按默认值回填；昵称字段名为 `nickname`（历史版本里的拼写错误 `nike_name` 已废弃）。
+> - 六个高级生成参数与 `DEFAULT_ADVANCED` 一一对应，**跟着会话走**：切回某个会话时会恢复它自己的这套参数；老存档没有这些字段就按默认值来。
 > - `reasoning_content` 只在开启深度思考时出现，用于回放折叠的思考过程；请求时会一并回传给 API（服务端会忽略它，且不计入上下文长度）。
 
 ## 高级配置说明
