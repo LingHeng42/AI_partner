@@ -129,7 +129,7 @@ check("高级配置默认折叠", advanced and advanced[0].proto.expanded is Fal
 check("会话历史分区存在", any(s.value == "会话历史" for s in at.subheader), [s.value for s in at.subheader])
 check("管理角色分区存在", any(s.value == "管理角色" for s in at.subheader), [s.value for s in at.subheader])
 check("生成参数分区存在", any(s.value == "生成参数" for s in at.subheader), [s.value for s in at.subheader])
-sessions_dir = PROJECT / "sessions"
+# sessions_dir 已在上面指向隔离目录（FAKE_SESSIONS），这里不能再改成真实目录
 check("主区域不再显示会话 ID", not any("当前会话：" in c.value for c in at.caption), [c.value for c in at.caption][:3])
 check("没有对话时不显示会话条目",
       not any("（当前）" in b.label for b in at.button), [b.label for b in at.button])

@@ -426,7 +426,7 @@ check("请求 stream=True", completions.calls[-1]["stream"] is True)
 check("请求带上了 system + 历史", completions.calls[-1]["messages"][1] == {"role": "user", "content": "你好"})
 check("思考关闭时不发 reasoning_effort", "reasoning_effort" not in completions.calls[-1])
 check("思考关闭时 thinking=disabled", completions.calls[-1]["extra_body"] == {"thinking": {"type": "disabled"}})
-check("思考关闭时不渲染思考折叠面板", expanders.by_label("🤔 思考过程") == [], [s.label for s in expanders.sinks])
+check("思考关闭时不渲染思考折叠面板", expanders.by_label("思考过程") == [], [s.label for s in expanders.sinks])
 check("回答后自动落盘", (tmp / "2026-01-01_120000_000.json").exists())
 check("落盘内容包含新回答",
       json.loads((tmp / "2026-01-01_120000_000.json").read_text(encoding="utf-8"))["message"][-1]["content"] == "你好，人类")
@@ -435,7 +435,7 @@ app.st.session_state["thinking"] = True
 app.render_reply(_Sink())
 check("思考开启时 reasoning_effort=low", completions.calls[-1]["reasoning_effort"] == "low")
 check("思考开启时 thinking=enabled", completions.calls[-1]["extra_body"] == {"thinking": {"type": "enabled"}})
-check("思考开启时渲染思考折叠面板", len(expanders.by_label("🤔 思考过程")) == 1,
+check("思考开启时渲染思考折叠面板", len(expanders.by_label("思考过程")) == 1,
       [s.label for s in expanders.sinks])
 
 # --------------------------------------------------------------------------- #
@@ -455,7 +455,7 @@ app.render_reply(_Sink())
 reply = app.st.session_state.message[-1]
 check("推理内容被记录下来", reply.get("reasoning_content") == "先看他问的是什么。嗯，得用第一人称回答。", reply)
 check("正文不混入推理内容", reply["content"] == "我在。", reply)
-blocks = expanders.by_label("🤔 思考过程")
+blocks = expanders.by_label("思考过程")
 check("思考过程渲染在折叠面板里", len(blocks) == 1, [s.label for s in expanders.sinks])
 check("思考中自动展开过", blocks and True in blocks[0].states, blocks[0].states if blocks else None)
 check("流式结束后保持展开（不强制折叠）", blocks and blocks[0].expanded is True, blocks[0].states if blocks else None)
@@ -477,7 +477,7 @@ app.st.session_state.message = [
     {"role": "assistant", "content": "不带推理的回答"},
 ]
 app.render_history()
-check("回放时只对含推理的回答生成折叠面板", len(expanders.sinks) == 1 and expanders.sinks[0].label == "🤔 思考过程",
+check("回放时只对含推理的回答生成折叠面板", len(expanders.sinks) == 1 and expanders.sinks[0].label == "思考过程",
       [s.label for s in expanders.sinks])
 check("回放时思考面板默认折叠", expanders.sinks and expanders.sinks[0].states == [False],
       expanders.sinks[0].states if expanders.sinks else None)

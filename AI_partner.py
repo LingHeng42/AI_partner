@@ -526,12 +526,18 @@ def _remember_expander(widget_key: str, state_key: str) -> None:
 
 
 def reasoning_expander(key: str, state_key: str, expanded: bool):
-    """带记忆的「思考过程」折叠面板：用户手动开合后不会被流式重跑重置。"""
+    """带记忆的「思考过程」折叠面板：用户手动开合后不会被流式重跑重置。
+
+    type="compact" 是 Streamlit 官方推荐的思考块样式（无边框内联展开），
+    与 ChatGPT / DeepSeek 的「思考过程」观感一致。
+    """
     st.session_state.setdefault(state_key, expanded)
     return st.expander(
-        "🤔 思考过程",
+        "思考过程",
         expanded=st.session_state[state_key],
         key=key,
+        type="compact",
+        icon=":material/neurology:",
         on_change=_remember_expander,
         args=(key, state_key),
     )
@@ -827,7 +833,11 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 # 对话框
 # --------------------------------------------------------------------------- #
-prompt = st.chat_input("请输入您的想法...")
+prompt = st.chat_input(
+    "请输入您的想法...",
+    # 回答流式生成中禁用输入，避免误触打断（官方推荐的 chat 用法）
+    submit_mode="disable",
+)
 
 if prompt:
     st.session_state.message.append({"role": "user", "content": prompt})  # 用户输入入列

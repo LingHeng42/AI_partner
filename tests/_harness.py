@@ -99,6 +99,10 @@ def reset_tmp() -> None:
     stale = [p.name for p in SESSIONS_DIR.iterdir()]
     if stale:
         sys.exit(f"测试存档目录不干净（{SESSIONS_DIR}）：{stale}")
+    # 护栏：绝不允许测试去动真实的 sessions/（曾经因为测试指向它而误删用户存档）
+    real_sessions = (PROJECT / "sessions").resolve()
+    if SESSIONS_DIR.resolve() == real_sessions or real_sessions in SESSIONS_DIR.resolve().parents:
+        sys.exit(f"测试存档目录指向了真实目录，拒绝运行：{SESSIONS_DIR}")
 
 
 # 干净起点 + 环境变量 + 路径
