@@ -40,7 +40,7 @@ def write_wrapper(name: str, body: str) -> Path:
 # --------------------------------------------------------------------------- #
 # 假客户端：AI_partner 在脚本里 import OpenAI 时拿到的是这个类
 # --------------------------------------------------------------------------- #
-(TMP_DIR / "_fake_openai.py").write_text(
+(TMP_DIR / "_fake_openai_smoke.py").write_text(
     '''
 import streamlit as st
 import AI_partner as _app
@@ -86,7 +86,7 @@ _app.__dict__["_FAKE_OPENAI_STATE"] = STATE
 wrapper = write_wrapper(
     "_app_wrapper.py",
     "os.environ['DEEPSEEK_API_KEY'] = 'sk-test-not-used'\n"
-    "import _fake_openai\n"
+    "import _fake_openai_smoke\n"
     "import AI_partner\n",
 )
 
@@ -102,21 +102,27 @@ for _f in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
     _f.unlink()
 
 at = AppTest.from_file(str(wrapper), default_timeout=60).run()
-import _fake_openai  # noqa: E402  脚本执行时已导入，这里拿到同一个模块对象
+import _fake_openai_smoke  # noqa: E402  脚本执行时已导入，这里拿到同一个模块对象
 
-check("假客户端已注入", isinstance(_fake_openai.STATE, dict), type(_fake_openai.STATE).__name__)
+check("假客户端已注入", isinstance(_fake_openai_smoke.STATE, dict), type(_fake_openai_smoke.STATE).__name__)
 check("页面无异常启动", not at.exception, str(at.exception))
 check("标题不再占据主区域", not any("凌恒的酒馆" in h.value for h in at.header), [h.value for h in at.header])
 check("标题移到侧边栏（markdown 渲染）", any("凌恒的酒馆" in (m.value or "") for m in at.markdown),
       [m.value for m in at.markdown][:3])
 check("聊天输入框存在", len(at.chat_input) == 1)
-check("会话名称输入框存在", "会话名称" in [t.label for t in at.text_input], [t.label for t in at.text_input])
-check("会话名称默认值", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
+# 会话改名已改为在会话历史的「⋯」菜单里做，侧边栏不再有「会话名称」输入框
+check("侧边栏不再有会话名称输入框",
+      "会话名称" not in [t.label for t in at.text_input], [t.label for t in at.text_input])
+check("会话名称状态仍是默认值", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
 check("昵称输入框存在", "昵称" in [t.label for t in at.text_input], [t.label for t in at.text_input])
 check("昵称字段名为 nickname", at.session_state["nickname"] == "溟月", at.session_state["nickname"])
 check("侧边栏三个多行输入框齐全", [t.label for t in at.text_area] == ["性格", "角色简介", "输出规则"], [t.label for t in at.text_area])
 check("侧边栏有深度思考开关", [t.label for t in at.toggle] == ["深度思考"], [t.label for t in at.toggle])
 check("新建会话按钮存在", any(b.label == "新建会话" for b in at.button))
+# 刚打开（还没产生任何对话）时处于"新建会话"状态，按钮应高亮
+fresh_btn = next((b for b in at.button if b.label == "新建会话"), None)
+check("启动时「新建会话」高亮", fresh_btn is not None and fresh_btn.proto.type == "primary",
+      fresh_btn.proto.type if fresh_btn else None)
 advanced = [e for e in at.expander if "高级配置" in (e.label or "")]
 check("高级配置折叠面板存在", len(advanced) == 1, [e.label for e in at.expander])
 check("高级配置默认折叠", advanced and advanced[0].proto.expanded is False, advanced[0].proto.expanded if advanced else None)
@@ -131,7 +137,7 @@ check("空会话给出会话历史提示",
       any("还没有会话" in c.value for c in at.caption), [c.value for c in at.caption])
 check("启动阶段不创建空存档", not list(sessions_dir.glob("*.json")),
       [f.name for f in sessions_dir.glob("*.json")])
-check("启动阶段未发起任何模型请求", _fake_openai.STATE["calls"] == [])
+check("启动阶段未发起任何模型请求", _fake_openai_smoke.STATE["calls"] == [])
 
 # --------------------------------------------------------------------------- #
 # B. 点击「新建会话」：回调里改 session_title 不能触发

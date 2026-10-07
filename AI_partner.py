@@ -246,6 +246,15 @@ def session_file_exists(session_name: str = None) -> bool:
         return False
 
 
+def is_fresh_session() -> bool:
+    """当前是否处于"新建会话"状态。
+
+    判定标准：这个会话还没有落盘（= 还没有产生任何对话）。一旦发出第一条消息，
+    存档建立、会话进入历史，就不再是"新建会话"状态了。
+    """
+    return not session_file_exists()
+
+
 def load_selected_session(session_name: str) -> None:
     try:
         path = _safe_session_path(session_name)
@@ -568,18 +577,27 @@ with st.sidebar:
 
     st.divider()
 
-    # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）
-    st.button("新建会话", width="stretch", icon="📝", on_click=new_session)
+    # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）。
+    # 处于"新建会话"状态（还没有产生对话）时用主色高亮，产生对话、会话进入历史后
+    # 自动恢复成普通按钮
+    st.button(
+        "新建会话",
+        width="stretch",
+        icon="📝",
+        type="primary" if is_fresh_session() else "secondary",
+
+        on_click=new_session,
+    )
 
     # 会话名称：与存档文件名（会话 ID）解耦，改名不会新建/移动文件
     # 注意：控件 key 直接占用 "session_title"，所以只能在回调里改这个键
-    st.text_input(
-        "会话名称",
-        value=st.session_state.session_title,
-        key="session_title",
-        placeholder=DEFAULT_SESSION_TITLE,
-        help="只影响显示，不会改变存档文件名（文件名始终是会话 ID 时间戳）。",
-    )
+    # st.text_input(
+    #     "会话名称",
+    #     value=st.session_state.session_title,
+    #     key="session_title",
+    #     placeholder=DEFAULT_SESSION_TITLE,
+    #     help="只影响显示，不会改变存档文件名（文件名始终是会话 ID 时间戳）。",
+    # )
 
     st.subheader("会话历史")
     session_list = load_session_list()
@@ -668,11 +686,11 @@ with st.sidebar:
     st.toggle(
         "深度思考",
         key="thinking",
-        help="开启后模型会先推理再回答（推理过程显示在可折叠的「思考过程」里），速度更慢但更严谨；关闭则直接作答。",
+        help="开启后模型会先思考再回答；关闭则直接作答。",
     )
 
     # 高级配置：默认折叠，点开才展开（展开状态会被记住）
-    with st.expander("⚙️ 高级配置", expanded=False, key="advanced_panel"):
+    with st.expander("⚙️ 高级配置(注意：调整后进行对话才会生效)", expanded=False, key="advanced_panel"):
         st.slider(
             "温度 (temperature)",
             min_value=0.0,
@@ -687,7 +705,7 @@ with st.sidebar:
             max_value=1.0,
             step=0.05,
             key="top_p",
-            help="与温度二选一调即可。一般固定温度、把 top_p 留在 1.0。",
+            help="top_p=1：全部词汇都参与采样，随机性最大；top_p 越小：候选词越少，输出越确定、保守",
         )
         st.slider(
             "重复惩罚 (frequency_penalty)",

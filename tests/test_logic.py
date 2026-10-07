@@ -609,10 +609,12 @@ app.st.session_state["current_session"] = auto_id
 app.st.session_state["session_title"] = "自动归档测试"
 
 check("发言前历史里没有它", auto_id not in app.load_session_list(), app.load_session_list())
+check("发言前处于新建会话状态", app.is_fresh_session() is True)
 
 app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
 app.client = FakeClient(completions=FakeCompletions())
 app.render_reply(_Sink())
+check("发言并落盘后不再是新建会话状态", app.is_fresh_session() is False)
 
 check("发言后自动落盘", (tmp / f"{auto_id}.json").exists(), [f.name for f in tmp.glob("*.json")])
 check("发言后自动出现在会话历史里", auto_id in app.load_session_list(), app.load_session_list())
@@ -676,6 +678,21 @@ check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)
 
 app.st.rerun = _Sink()
 check("session_file_exists 能正确判断", app.session_file_exists("no-such") is False)
+
+# --------------------------------------------------------------------------- #
+# 「新建会话」按钮的高亮状态：处于新建会话时高亮，产生对话后恢复
+# --------------------------------------------------------------------------- #
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app.st.session_state["current_session"] = "2099-05-01_000000_000"
+app.st.session_state["message"] = []
+check("没有任何对话时属于新建会话状态（按钮高亮）", app.is_fresh_session() is True, app.is_fresh_session())
+app.st.session_state["message"] = [{"role": "user", "content": "第一句"}]
+app.save_session()
+check("产生对话后不再是新建会话（按钮恢复）", app.is_fresh_session() is False, app.is_fresh_session())
+# 再点一次新建会话 → 又回到高亮状态
+app.new_session()
+check("再次新建会话后重新高亮", app.is_fresh_session() is True, app.is_fresh_session())
 
 # --------------------------------------------------------------------------- #
 # 重命名与置顶

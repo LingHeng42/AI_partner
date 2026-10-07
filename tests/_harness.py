@@ -27,7 +27,11 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT = TESTS_DIR.parent
 TMP_DIR = TESTS_DIR / ".tmp"
-SESSIONS_DIR = TMP_DIR / "sessions"
+# 每次运行用独立的存档目录名：沙箱往 .tmp 里写的临时子目录带
+# `Everyone Deny DeleteSubdirectoriesAndFiles` 拒绝 ACE，在受限权限下连 icacls 都
+# 被拒（Access is denied），那层目录删不掉。用独立名字就不用依赖删除成功——
+# 旧目录即使残留也不会影响本次运行。
+SESSIONS_DIR = TMP_DIR / f"sessions_{os.getpid()}"
 
 
 def _run(cmd: list) -> None:
@@ -72,10 +76,15 @@ def purge(path: Path) -> bool:
 
 
 def reset_tmp() -> None:
-    """清空并重建临时目录（每次运行都从干净状态开始）。"""
-    # 逐个顶层子项先摘掉拒绝 ACE：整棵树里只要有沙箱建的目录，
-    # 直接从父目录删除就会连带失败
+    """清空并重建临时目录（每次运行都从干净状态开始）。
+
+    删不掉的（沙箱建的受限 ACL 目录）会被忽略，并顺手清理上一轮留下的
+    sessions_* 隔离目录——即使删不掉也无所谓，因为本次用的是独立目录名。
+    """
     if TMP_DIR.exists():
+        # 上一轮的隔离存档目录：能删就删，删不掉也不影响本次运行
+        for stale in TMP_DIR.glob("sessions_*"):
+            purge(stale)
         try:
             for child in TMP_DIR.iterdir():
                 strip_deny_aces(child)
@@ -84,6 +93,8 @@ def reset_tmp() -> None:
     purge(TMP_DIR)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    if not SESSIONS_DIR.is_dir():
+        sys.exit(f"无法创建测试存档目录：{SESSIONS_DIR}")
 
 
 # 干净起点 + 环境变量 + 路径

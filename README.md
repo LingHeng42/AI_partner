@@ -50,13 +50,19 @@ requirements.txt     依赖清单
 把存档目录指到 `tests/.tmp` 下的隔离目录）：
 
 ```bash
-.venv\Scripts\python.exe tests\test_logic.py        # 存档 / 上下文截断 / 对话流程 / 重命名与置顶
-.venv\Scripts\python.exe tests\test_smoke.py        # 页面渲染 / 空会话不建档 / 新建会话回调
-.venv\Scripts\python.exe tests\test_row_render.py   # 会话条目与「⋯」操作菜单渲染 / 回车重命名
-.venv\Scripts\python.exe tests\clean_tmp.py         # 清掉测试临时目录 tests/.tmp
+.venv\Scripts\python.exe tests\run_tests.py          # 一次跑完三个套件（各起独立进程）
+.venv\Scripts\python.exe tests\test_logic.py         # 存档 / 上下文截断 / 对话流程 / 重命名与置顶
+.venv\Scripts\python.exe tests\test_smoke.py         # 页面渲染 / 空会话不建档 / 新建会话高亮
+.venv\Scripts\python.exe tests\test_row_render.py    # 会话条目与「⋯」操作菜单渲染 / 回车重命名
+.venv\Scripts\python.exe tests\clean_tmp.py          # 清掉测试临时目录 tests/.tmp
 ```
 
-`tests/.tmp` 每次运行开头都会被清空，所以不会累积；需要立刻清掉时跑 `clean_tmp.py`。
+为什么用 `run_tests.py` 而不是挨个跑：Streamlit 的 `AppTest` 会复用 `sys.modules` 里
+已缓存的 `AI_partner`，同一个进程里只有第一次运行会真正执行应用脚本，连着跑后面的
+套件会拿到上一次的模块状态（表现为"单独跑通过、连着跑失败"）。`run_tests.py`
+让每个套件各起一个干净进程，避免这个问题。
+
+`tests/.tmp` 每次运行开头都会被清理，所以不会累积；需要立刻清掉时跑 `clean_tmp.py`。
 
 ## 会话存档格式
 

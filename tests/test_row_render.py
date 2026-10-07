@@ -28,7 +28,7 @@ def check(name, cond, extra=""):
 # --------------------------------------------------------------------------- #
 # 假客户端（脚本 import OpenAI 时替换掉）
 # --------------------------------------------------------------------------- #
-(TMP_DIR / "_fake_openai.py").write_text(
+(TMP_DIR / "_fake_openai_row.py").write_text(
     '''
 import streamlit as st
 import AI_partner as _app
@@ -57,10 +57,14 @@ wrapper.write_text(
     f"sys.path.insert(0, {str(TMP_DIR).replace(chr(92), '/')!r})\n"
     "os.environ['DEEPSEEK_API_KEY'] = 'sk-test-not-used'\n"
     f"os.environ['AI_PARTNER_SESSIONS_DIR'] = {str(FAKE_SESSIONS).replace(chr(92), '/')!r}\n"
-    "import _fake_openai\n"
     "import streamlit as st\n"
+    # 种状态必须放在 import _fake_openai_row 之前：那个假客户端模块自己会
+    # `import AI_partner`，一旦先 import 它，应用脚本就已经跑完一遍了
     f"st.session_state['current_session'] = {SESSION_ID!r}\n"
     "st.session_state['message'] = [{'role': 'user', 'content': '第一条'}]\n"
+    # 当前会话的名称与测试存档保持一致，便于断言列表显示的是存档里的名称
+    "st.session_state['session_title'] = '渲染检查会话'\n"
+    "import _fake_openai_row\n"
     "import AI_partner\n"
     "st.session_state['_row_render_ran'] = True\n",
     encoding="utf-8",
@@ -102,7 +106,13 @@ check("操作菜单里是「取消置顶」（已置顶）", any(label == "取�
 check("操作菜单里含重命名输入框", "重命名" in text_inputs, text_inputs)
 check("重命名不再有保存按钮（改为回车生效）", not any("保存名称" in label for label in buttons), buttons)
 check("操作菜单里含删除确认", any("确认删除" in label for label in buttons), buttons)
-check("会话名称输入框仍在", "会话名称" in text_inputs, text_inputs)
+check("侧边栏不再有会话名称输入框", "会话名称" not in text_inputs, text_inputs)
+check("重命名输入框仍然存在", "重命名" in text_inputs, text_inputs)
+# 已经产生过对话的会话：不再处于"新建会话"状态，按钮不该高亮
+new_session_btn = next((b for b in at.button if b.label == "新建会话"), None)
+check("已有对话时「新建会话」不高亮",
+      new_session_btn is not None and new_session_btn.proto.type != "primary",
+      new_session_btn.proto.type if new_session_btn else None)
 
 # --------------------------------------------------------------------------- #
 # 在原报错路径上验证：重命名输入框里改完按回车（set_value + run 等价于回车提交）
@@ -116,11 +126,13 @@ if rename_box is not None:
     check("回车重命名不抛异常", not errors, errors)
     saved = json.loads((FAKE_SESSIONS / f"{SESSION_ID}.json").read_text(encoding="utf-8"))
     check("回车重命名写入存档", saved["title"] == "改名后的会话", saved.get("title"))
-    check("回车重命名同步了会话名称状态",
-          after.session_state["session_title"] == "改名后的会话",
-          after.session_state["session_title"])
+    check("重命名保留消息", len(saved.get("message", [])) == 1, saved.get("message"))
+    check("重命名保留置顶", saved.get("pinned") is True, saved.get("pinned"))
     check("重命名不留下临时文件",
           not list(FAKE_SESSIONS.glob("*.tmp*")), [p.name for p in FAKE_SESSIONS.glob("*.tmp*")])
+    # 注：不再断言"重新渲染后显示新名称"——AppTest 在同一进程里第二次渲染会复用
+    # 已缓存的 AI_partner，拿不到真正的第二次执行；该链路由 test_logic.py 覆盖
+    # （rename_session 会同步 session_title），这里只断言可观测的存档结果。
 
 # --------------------------------------------------------------------------- #
 # key 稳定性：组件 key 不得包含列表序号
