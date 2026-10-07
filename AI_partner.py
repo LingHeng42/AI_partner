@@ -555,11 +555,20 @@ def render_reply(placeholder) -> None:
                     reasoning += reasoning_piece
                     if thinking_enabled:
                         # 推理内容只更新占位符，不重建整条消息
-                        reasoning_text.markdown(reasoning + "▌")
+                        reasoning_text.markdown(
+                            format_reasoning_html(reasoning, streaming=True),
+                            unsafe_allow_html=True,
+                        )
                 if content_piece:
                     if thinking_enabled and reasoning_text is not None:
                         # 思考结束：撤掉"思考中"的微光提示，把完整推理定格
-                        reasoning_text.markdown(reasoning or "_（本次没有输出推理内容）_")
+                        if reasoning:
+                            reasoning_text.markdown(
+                                format_reasoning_html(reasoning),
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            reasoning_text.markdown("_（本次没有输出推理内容）_")
                     yield content_piece
 
         with placeholder.chat_message("assistant"):
@@ -601,10 +610,29 @@ def render_history() -> None:
         with st.chat_message(msg["role"]):
             if msg.get("reasoning_content"):
                 with reasoning_expander(f"history_reasoning_{index}", f"history_reasoning_open_{index}", False):
-                    st.markdown(msg["reasoning_content"])
+                    # 引用块，原生md，不存在html懒渲染问题
+                    st.markdown(
+                        format_reasoning_html(msg["reasoning_content"]),
+                        unsafe_allow_html=True,
+                    )
+
             if msg.get("content"):
                 st.markdown(msg["content"])
 
+def format_reasoning_html(text: str, streaming: bool = False) -> str:
+    """把推理内容包装成紧凑样式的 HTML，流式时带光标。"""
+    cursor = "▌" if streaming else ""
+    escaped = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+    return (
+        '<div style="font-size: 0.875rem; line-height: 1.6; '
+        'color: var(--text-color); opacity: 0.75; '
+        'white-space: pre-wrap; font-family: inherit;">'
+        f'{escaped}{cursor}</div>'
+    )
 
 # --------------------------------------------------------------------------- #
 # 页面配置（必须是第一个 Streamlit 命令）
