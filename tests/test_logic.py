@@ -258,8 +258,10 @@ check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120
 check("会话名称被写入存档", data["title"] == "第一次聊天", data.get("title"))
 check("读回自定义会话名称", app.session_title("2026-01-01_120000_000") == "第一次聊天")
 check("默认不置顶", data["pinned"] is False, data.get("pinned"))
-check("session_meta 同时给出名称与置顶状态",
-      app.session_meta("2026-01-01_120000_000") == {"title": "第一次聊天", "pinned": False},
+check("session_meta 同时给出名称、昵称与置顶状态",
+      app.session_meta("2026-01-01_120000_000") == {"title": "第一次聊天",
+                                                    "nickname": app.DEFAULT_PROFILE["nickname"],
+                                                    "pinned": False},
       app.session_meta("2026-01-01_120000_000"))
 
 app.st.session_state["message"] = []
@@ -680,6 +682,76 @@ app.st.rerun = _Sink()
 check("session_file_exists 能正确判断", app.session_file_exists("no-such") is False)
 
 # --------------------------------------------------------------------------- #
+# 草稿：还没产生对话时，改人设/高级参数也要立刻落盘，但不能进会话历史
+# --------------------------------------------------------------------------- #
+for _f in tmp.glob("*.json"):
+    _f.unlink()
+app._discard_all_drafts() if hasattr(app, "_discard_all_drafts") else None
+app.st.session_state = _State()
+app.st.session_state.update(app.DEFAULT_PROFILE)
+app.st.session_state.update(app.DEFAULT_ADVANCED)
+app.st.session_state["thinking"] = False
+app.st.session_state["message"] = []
+app.st.session_state["current_session"] = "2099-06-01_000000_000"
+app.st.session_state["session_title"] = "草稿会话"
+
+app.save_session()
+draft = app.DRAFTS_DIR / "2099-06-01_000000_000.draft"
+check("空对话时写的是草稿", draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+check("空对话时不产生正式存档", not (tmp / "2099-06-01_000000_000.json").exists())
+check("草稿不进会话历史", app.load_session_list() == [], app.load_session_list())
+check("草稿里存了人设", json.loads(draft.read_text(encoding="utf-8"))["nickname"] == app.DEFAULT_PROFILE["nickname"])
+
+# 改人设 → 立刻落盘到草稿
+app.st.session_state["nickname"] = "改过的昵称"
+app.st.session_state["temperature"] = 0.25
+app.save_session()
+draft_data = json.loads(draft.read_text(encoding="utf-8"))
+check("改人设后草稿立刻更新", draft_data["nickname"] == "改过的昵称", draft_data.get("nickname"))
+check("改参数后草稿立刻更新", draft_data["temperature"] == 0.25, draft_data.get("temperature"))
+
+# 没有对话时切回来仍能恢复草稿内容
+app.st.session_state["nickname"] = "被覆盖"
+app.st.session_state["temperature"] = 1.0
+app.load_selected_session("2099-06-01_000000_000")
+check("从草稿恢复人设", app.st.session_state["nickname"] == "改过的昵称", app.st.session_state["nickname"])
+check("从草稿恢复参数", app.st.session_state["temperature"] == 0.25, app.st.session_state["temperature"])
+check("从草稿恢复时对话为空", app.st.session_state["message"] == [])
+
+# 产生第一条对话：草稿转正、正式存档建立、草稿被清理
+app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
+app.client = FakeClient(completions=FakeCompletions())
+app.st.session_state["current_session"] = "2099-06-01_000000_000"
+app.save_session()
+check("产生对话后建立正式存档", (tmp / "2099-06-01_000000_000.json").exists())
+check("转正后草稿被清掉", not draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+check("转正后进入会话历史", app.load_session_list() == ["2099-06-01_000000_000"], app.load_session_list())
+saved_promoted = json.loads((tmp / "2099-06-01_000000_000.json").read_text(encoding="utf-8"))
+check("转正后保留草稿里改过的人设", saved_promoted["nickname"] == "改过的昵称", saved_promoted.get("nickname"))
+check("转正后保留草稿里改过的参数", saved_promoted["temperature"] == 0.25, saved_promoted.get("temperature"))
+
+# 删除只有草稿的会话：草稿也要清掉
+app.st.session_state["current_session"] = "2099-06-02_000000_000"
+app.st.session_state["message"] = []
+app.save_session()
+draft2 = app.DRAFTS_DIR / "2099-06-02_000000_000.draft"
+check("第二个草稿已建立", draft2.exists())
+app.delete_session("2099-06-02_000000_000")
+check("删除会话时草稿一起清掉", not draft2.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+
+# 「恢复默认值」按钮的回调：还原并落盘
+app.st.session_state["message"] = []
+app.st.session_state["current_session"] = "2099-06-03_000000_000"
+app.st.session_state.update({"temperature": 1.5, "top_p": 0.2})
+app.reset_advanced_and_save()
+draft3 = app.DRAFTS_DIR / "2099-06-03_000000_000.draft"
+check("恢复默认值后立刻落盘", draft3.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+check("恢复默认值后草稿里是默认参数",
+      json.loads(draft3.read_text(encoding="utf-8"))["temperature"] == app.DEFAULT_ADVANCED["temperature"])
+for _f in list(app.DRAFTS_DIR.glob("*")):
+    _f.unlink()
+
+# --------------------------------------------------------------------------- #
 # 「新建会话」按钮的高亮状态：处于新建会话时高亮，产生对话后恢复
 # --------------------------------------------------------------------------- #
 for _f in tmp.glob("*.json"):
@@ -714,8 +786,8 @@ app.rename_session("2026-05-05_120000_000", "崭新名字")
 check("重命名写入存档", app.session_title("2026-05-05_120000_000") == "崭新名字",
       app.session_title("2026-05-05_120000_000"))
 check("重命名不改变文件名", (tmp / "2026-05-05_120000_000.json").exists())
-check("重命名保留消息", len(app.session_meta("2026-05-05_120000_000")) == 2
-      and json.loads((tmp / "2026-05-05_120000_000.json").read_text(encoding="utf-8"))["message"]
+check("重命名保留消息",
+      json.loads((tmp / "2026-05-05_120000_000.json").read_text(encoding="utf-8"))["message"]
       == [{"role": "user", "content": "内容"}])
 check("重命名当前会话会同步输入框的值", app.st.session_state["session_title"] == "崭新名字",
       app.st.session_state["session_title"])

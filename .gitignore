@@ -16,3 +16,8 @@ sessions/*.tmp*
 tests/.tmp/
 ._*.log
 .gitmsg.txt
+
+# 工具技能包（由客户端生成）
+.agents/
+.claude/
+sessions/drafts/

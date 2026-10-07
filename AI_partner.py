@@ -24,6 +24,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SESSIONS_DIR = Path(
     os.environ.get("AI_PARTNER_SESSIONS_DIR") or (BASE_DIR / "sessions")
 ).expanduser()
+# 草稿目录：给"还没产生对话"的会话存人设/高级参数，不进会话历史
+DRAFTS_DIR = SESSIONS_DIR / "drafts"
 RESOURCES_DIR = BASE_DIR / "resources"
 LOGO_PATH = RESOURCES_DIR / "logo.png"
 
@@ -99,15 +101,23 @@ def profile_from_state() -> dict:
 
 
 def session_meta(session_name: str) -> dict:
-    """读某个存档的元信息（名称、是否置顶）；读不出来时给出安全默认值。"""
-    meta = {"title": session_name, "pinned": False}
+    """读某个存档的元信息（名称、昵称、是否置顶）；读不出来时给出安全默认值。
+
+    还没产生对话的会话只有草稿，这里也会去草稿里读，保证侧边栏显示的是最新人设。
+    """
+    meta = {"title": session_name, "nickname": DEFAULT_PROFILE["nickname"], "pinned": False}
     try:
         path = _safe_session_path(session_name)
         if not path.exists():
-            return meta
+            draft = draft_path(session_name)
+            if draft is not None and draft.exists():
+                path = draft
+            else:
+                return meta
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         meta["title"] = (data.get("title") or "").strip() or session_name
+        meta["nickname"] = (data.get("nickname") or "").strip() or DEFAULT_PROFILE["nickname"]
         meta["pinned"] = bool(data.get("pinned"))
     except Exception:  # noqa: BLE001 - 元信息损坏不该影响整个侧边栏
         pass
@@ -124,7 +134,7 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
     临时文件用随机后缀，避免和上一次失败残留的 .tmp 互相干扰。
     """
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)  # 草稿在 sessions/drafts 下
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
     try:
         with tmp.open("w", encoding="utf-8") as f:
@@ -147,10 +157,14 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 
 def _update_session_meta(session_name: str, **changes) -> None:
-    """就地更新存档里的元信息字段（title / pinned），保留消息与人设。"""
+    """就地更新存档（或草稿）里的元信息字段（title / pinned），保留其它内容。"""
     path = _safe_session_path(session_name)
     if not path.exists():
-        return
+        draft = draft_path(session_name)
+        if draft is not None and draft.exists():
+            path = draft  # 还没产生对话的会话：改它的草稿
+        else:
+            return
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     data.update(changes)
@@ -194,26 +208,79 @@ def reset_profile() -> None:
     st.session_state.message = []
 
 
+def draft_path(session_name: str = None):
+    """草稿文件路径：给"还没产生对话"的会话存人设与高级参数。"""
+    name = session_name or st.session_state.get("current_session")
+    if not name:
+        return None
+    try:
+        _safe_session_path(name)  # 借用同一套路径校验
+    except ValueError:
+        return None
+    return DRAFTS_DIR / f"{name}.draft"
+
+
+def save_draft(data: dict) -> None:
+    """把人设/高级参数立刻写进草稿文件（不进会话历史）。"""
+    path = draft_path()
+    if path is None:
+        return
+    if not data.get("message"):
+        _write_json_atomic(path, data)
+
+
+def discard_draft(session_name: str = None) -> None:
+    """删掉草稿（会话正式落盘或会话被删除时调用）。"""
+    path = draft_path(session_name)
+    if path is not None and path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _file_pinned() -> bool:
+    """当前会话存档里的置顶状态。
+
+    置顶是单独由 set_pinned() 写进文件的；save_session() 只负责其它字段，
+    不能拿内存里的值去覆盖它（否则改一次人设就会把置顶弄丢）。
+    """
+    try:
+        path = _safe_session_path(st.session_state.get("current_session"))
+    except ValueError:
+        return False
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return bool(json.load(f).get("pinned"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def save_session() -> None:
-    """把当前会话原子写入 sessions/<会话ID>.json，写一半崩溃也不会损坏旧存档。
+    """把当前会话原子写入 sessions/<会话ID>.json。
 
     一条存档 = 会话名称 + 置顶 + 消息 + 人设 + 高级生成参数。
-    空对话（还没有任何消息）不落盘：否则每次新建会话都会留下一个空档案，
-    历史里会出现两条同名记录。
+    - 已经产生过对话：写正式存档，并清掉同名草稿
+    - 还没有对话（比如刚新建就改了人设/参数）：只写 drafts/<会话ID>.draft，
+      这样修改立刻落盘、又不会在会话历史里留下空条目
     """
     if not st.session_state.get("current_session"):
         return
-    if not st.session_state.get("message"):
-        return
     session_data = {
         "title": st.session_state.get("session_title", ""),
-        "pinned": bool(st.session_state.get("session_pinned", False)),
-        "message": st.session_state.message,
+        "pinned": _file_pinned(),
+        "message": st.session_state.get("message", []),
         **profile_from_state(),
         # 高级生成参数跟着会话走：切回来还能保持这套温度/惩罚设置
         **advanced_from_state(),
     }
+    if not session_data["message"]:
+        save_draft(session_data)
+        return
     _write_json_atomic(SESSIONS_DIR / f"{st.session_state.current_session}.json", session_data)
+    discard_draft()
 
 
 def load_session_list() -> list:
@@ -258,10 +325,17 @@ def is_fresh_session() -> bool:
 def load_selected_session(session_name: str) -> None:
     try:
         path = _safe_session_path(session_name)
-        if not path.exists():
+        draft = draft_path(session_name)
+        if not path.exists() and not (draft and draft.exists()):
             return
-        with path.open("r", encoding="utf-8") as f:
-            session_data = json.load(f)
+        session_data = {}
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
+                session_data = json.load(f)
+        else:
+            # 只有草稿（还没产生对话的会话）：恢复人设与参数，对话仍是空的
+            with draft.open("r", encoding="utf-8") as f:
+                session_data = json.load(f)
         st.session_state.message = session_data.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
             st.session_state[key] = session_data.get(key) or default
@@ -281,6 +355,12 @@ def _reset_advanced() -> None:
     """把高级生成参数恢复成默认值（新建/删除会话时用）。"""
     for key, value in DEFAULT_ADVANCED.items():
         st.session_state[key] = value
+
+
+def reset_advanced_and_save() -> None:
+    """「恢复默认值」按钮的回调：还原参数并立刻落盘。"""
+    _reset_advanced()
+    save_session()
 
 
 def new_session() -> None:
@@ -304,6 +384,7 @@ def delete_session(session_name: str) -> None:
         path = _safe_session_path(session_name)
         if path.exists():
             path.unlink()
+        discard_draft(session_name)  # 顺带清掉它的草稿
         if session_name == st.session_state.current_session:
             reset_profile()
             _reset_advanced()
@@ -613,7 +694,7 @@ with st.sidebar:
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                f"{pin_mark}{label}",
+                f"{pin_mark}{st.session_state.nickname if current else meta["nickname"]}-{label}",
                 width="stretch",
                 key=f"session_{session}",
                 help=f"会话 ID：{session}",
@@ -671,13 +752,13 @@ with st.sidebar:
 
     st.divider()
 
-    # 角色管理：控件 key 直接就是状态键，不需要手工回写（回写会在控件实例化后
-    # 修改同名 session_state，触发 StreamlitWidgetAlreadyInstantiatedError）
+    # 角色管理：控件 key 直接就是状态键；on_change 里立刻落盘，
+    # 不需要手动回写（回写会在控件实例化后改同名 session_state 而报错）
     st.subheader("管理角色")
-    st.text_input("昵称", key="nickname", placeholder="请输入昵称")
-    st.text_area("性格", key="nature", placeholder="请输入性格描述")
-    st.text_area("角色简介", key="role_description", placeholder="请输入角色简介")
-    st.text_area("输出规则", key="output_rules", placeholder="请输入输出规则")
+    st.text_input("昵称", key="nickname", placeholder="请输入昵称", on_change=save_session)
+    st.text_area("性格", key="nature", placeholder="请输入性格描述", on_change=save_session)
+    st.text_area("角色简介", key="role_description", placeholder="请输入角色简介", on_change=save_session)
+    st.text_area("输出规则", key="output_rules", placeholder="请输入输出规则", on_change=save_session)
 
     st.divider()
 
@@ -689,14 +770,16 @@ with st.sidebar:
         help="开启后模型会先思考再回答；关闭则直接作答。",
     )
 
-    # 高级配置：默认折叠，点开才展开（展开状态会被记住）
-    with st.expander("⚙️ 高级配置(注意：调整后进行对话才会生效)", expanded=False, key="advanced_panel"):
+    # 高级配置：默认折叠，点开才展开（展开状态会被记住）。
+    # 每个控件都挂 on_change=save_session：改完立刻写进存档/草稿
+    with st.expander("⚙️ 高级配置", expanded=False, key="advanced_panel"):
         st.slider(
             "温度 (temperature)",
             min_value=0.0,
             max_value=2.0,
             step=0.05,
             key="temperature",
+            on_change=save_session,
             help="越高越天马行空、越低越稳定保守。角色扮演想有个性可以调高，想稳定复现就调低。",
         )
         st.slider(
@@ -705,6 +788,7 @@ with st.sidebar:
             max_value=1.0,
             step=0.05,
             key="top_p",
+            on_change=save_session,
             help="top_p=1：全部词汇都参与采样，随机性最大；top_p 越小：候选词越少，输出越确定、保守",
         )
         st.slider(
@@ -713,6 +797,7 @@ with st.sidebar:
             max_value=2.0,
             step=0.1,
             key="frequency_penalty",
+            on_change=save_session,
             help="正值会降低重复用词的概率，负值鼓励复读。",
         )
         st.slider(
@@ -721,9 +806,11 @@ with st.sidebar:
             max_value=2.0,
             step=0.1,
             key="presence_penalty",
+            on_change=save_session,
             help="正值鼓励聊新话题，负值鼓励围绕已有内容展开。",
         )
-        st.checkbox("限制单次回复长度", key="limit_tokens", help="不勾选则由服务端决定上限。")
+        st.checkbox("限制单次回复长度", key="limit_tokens", on_change=save_session,
+                    help="不勾选则由服务端决定上限。")
         if st.session_state.limit_tokens:
             st.number_input(
                 "最大 tokens",
@@ -731,9 +818,10 @@ with st.sidebar:
                 max_value=32768,
                 step=256,
                 key="max_tokens",
+                on_change=save_session,
                 help="单次回答（不含思考过程）的长度上限。",
             )
-        st.button("恢复默认值", width="stretch", on_click=reset_advanced)
+        st.button("恢复默认值", width="stretch", on_click=reset_advanced_and_save)
 
 
 # --------------------------------------------------------------------------- #

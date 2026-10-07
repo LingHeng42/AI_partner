@@ -95,6 +95,10 @@ def reset_tmp() -> None:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     if not SESSIONS_DIR.is_dir():
         sys.exit(f"无法创建测试存档目录：{SESSIONS_DIR}")
+    # 隔离目录必须是干净的：有任何残留都直接失败，避免跑出假结果
+    stale = [p.name for p in SESSIONS_DIR.iterdir()]
+    if stale:
+        sys.exit(f"测试存档目录不干净（{SESSIONS_DIR}）：{stale}")
 
 
 # 干净起点 + 环境变量 + 路径

@@ -114,15 +114,19 @@ check("已有对话时「新建会话」不高亮",
       new_session_btn is not None and new_session_btn.proto.type != "primary",
       new_session_btn.proto.type if new_session_btn else None)
 
+# 两个要交互的输入框都在本次渲染的元素树里（用尽游标前先取好）
+rename_box = next((t for t in at.text_input if t.label == "重命名"), None)
+nickname_box = next((t for t in at.text_input if t.label == "昵称"), None)
+check("找到重命名输入框", rename_box is not None)
+check("找到昵称输入框", nickname_box is not None)
+
 # --------------------------------------------------------------------------- #
 # 在原报错路径上验证：重命名输入框里改完按回车（set_value + run 等价于回车提交）
 # --------------------------------------------------------------------------- #
-rename_box = next((t for t in at.text_input if t.label == "重命名"), None)
-check("找到重命名输入框", rename_box is not None)
 if rename_box is not None:
     rename_box.set_value("改名后的会话")
-    after = at.run()
-    errors = [e.message for e in after.exception]
+    at = at.run()
+    errors = [e.message for e in at.exception]
     check("回车重命名不抛异常", not errors, errors)
     saved = json.loads((FAKE_SESSIONS / f"{SESSION_ID}.json").read_text(encoding="utf-8"))
     check("回车重命名写入存档", saved["title"] == "改名后的会话", saved.get("title"))
@@ -130,9 +134,22 @@ if rename_box is not None:
     check("重命名保留置顶", saved.get("pinned") is True, saved.get("pinned"))
     check("重命名不留下临时文件",
           not list(FAKE_SESSIONS.glob("*.tmp*")), [p.name for p in FAKE_SESSIONS.glob("*.tmp*")])
-    # 注：不再断言"重新渲染后显示新名称"——AppTest 在同一进程里第二次渲染会复用
-    # 已缓存的 AI_partner，拿不到真正的第二次执行；该链路由 test_logic.py 覆盖
-    # （rename_session 会同步 session_title），这里只断言可观测的存档结果。
+
+# --------------------------------------------------------------------------- #
+# "改人设立刻落盘"的可观测结果（存档内容）由 tests/test_logic.py 断言：
+#   save_session() 在已有对话时直接写存档、空对话时写草稿；
+#   这里只额外断言控件确实挂上了 on_change 回调（UI 连线）。
+# 注：同一个测试进程里 AppTest 只有第一次渲染会真正执行应用脚本，
+#     所以"再渲染一次去点昵称输入框"这条路在本环境不可靠，不再强测。
+# --------------------------------------------------------------------------- #
+source = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+role_section = source.split('st.subheader("管理角色")', 1)[-1].split('st.subheader("生成参数")', 1)[0]
+check("人设输入框都挂了 on_change=save_session",
+      role_section.count("on_change=save_session") == 4, role_section.count("on_change=save_session"))
+advanced_section = source.split("高级配置", 1)[-1]
+check("高级参数控件都挂了 on_change=save_session",
+      advanced_section.count("on_change=save_session") >= 5, advanced_section.count("on_change=save_session"))
+check("恢复默认值按钮会立刻落盘", "on_click=reset_advanced_and_save" in source)
 
 # --------------------------------------------------------------------------- #
 # key 稳定性：组件 key 不得包含列表序号
