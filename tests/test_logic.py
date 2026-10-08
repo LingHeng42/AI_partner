@@ -12,7 +12,7 @@ import time
 import types
 from pathlib import Path
 
-from _harness import PROJECT, TMP_DIR  # noqa: F401  统一准备临时目录与环境变量
+from _harness import PROJECT, TMP_DIR, real_png  # noqa: F401  统一准备临时目录与环境变量
 
 failures = []
 
@@ -546,6 +546,32 @@ deep = [b for b in app.load_session_meta(bsid)["branches"] if b["id"] == sub_chi
 check("删父分支后子分支改挂到祖父", deep and deep[0]["parent"] == "main", deep)
 check("删父分支后子分支文件仍在", (tmp / bsid / "branches" / f"{sub_child}.json").exists())
 
+# 分支 ID 只增不减：删掉中间一条后，新分支不会复用那个编号
+# （复用会让"ID 大小"和"创建先后"对不上，列表看起来像乱序）
+id_test = "2011-11-11_000000_000"
+app.st.session_state["current_session"] = id_test
+app.st.session_state["current_branch"] = "main"
+app.st.session_state["message"] = [{"role": "user", "content": "问题"}]
+app.save_session()
+first = app.fork_branch(id_test, prefix=[], seed=None, parent="main", fork_index=0)   # b2
+second = app.fork_branch(id_test, prefix=[], seed=None, parent="main", fork_index=0)  # b3
+check("新分支 ID 从 b2 开始递增", (first, second) == ("b2", "b3"), (first, second))
+app.delete_branch(id_test, first)  # 删掉 b2，留下空缺
+third = app.fork_branch(id_test, prefix=[], seed=None, parent="main", fork_index=0)
+check("删掉中间分支后 ID 不复用（只增不减）", third == "b4", third)
+check("分支列表按创建时间排（main 在最前）",
+      app.branch_ids(id_test) == ["main", second, third], app.branch_ids(id_test))
+# 手动把存档里的顺序打乱（模拟"ID 与创建先后不一致"的存档）：读出来仍应按创建时间排
+meta_shuffled = app.load_session_meta(id_test)
+meta_shuffled["branches"] = [
+    {"id": "b9", "parent": "main", "fork_index": 0, "created_at": "2030-01-01T00:00:00"},
+    {"id": "b2", "parent": "main", "fork_index": 0, "created_at": "2020-01-01T00:00:00"},
+]
+app.write_session_meta(id_test, meta_shuffled)
+check("存档里 ID 乱序时按创建时间重排",
+      app.branch_ids(id_test) == ["b2", "b9"], app.branch_ids(id_test))
+app.delete_session(id_test)
+
 # 「再次进入会话时进入正确分支」：把指针指到非 main 的那条，重新载入会话
 target = app.branch_ids(bsid)[-1]
 meta_now = app.load_session_meta(bsid)
@@ -919,6 +945,151 @@ app.st.session_state["message"] = msgs_of(edit_id, "main")
 check("切回原分支后消息是原始的", [m["content"] for m in app.st.session_state["message"]] == ["原问题", "原回答"],
       app.st.session_state["message"])
 app.delete_session(edit_id)
+
+# --------------------------------------------------------------------------- #
+# 对话头像：每个会话独立，纯展示（绝不进入请求）
+# --------------------------------------------------------------------------- #
+# 格式判定只读文件头，因此这几条可以用极短的样本；
+# 但真正 set_avatar 时应用会用 Pillow 校验，必须用真实合法的图片，否则会被当成坏图
+PNG_BYTES = real_png((255, 0, 0))
+JPG_SAMPLE = b"\xff\xd8\xff\xe0" + b"jpg-header-only"
+GIF_SAMPLE = b"GIF89a" + b"gif-header-only"
+WEBP_SAMPLE = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"webp-header-only"
+
+
+class _FakeUpload:
+    """模拟 st.file_uploader 返回的 UploadedFile（只需要 getvalue）。"""
+
+    def __init__(self, data):
+        self._data = data
+
+    def getvalue(self):
+        return self._data
+
+
+check("PNG 格式识别", app.image_suffix(PNG_BYTES) == "png")
+check("JPEG 格式识别", app.image_suffix(JPG_SAMPLE) == "jpg")
+check("GIF 格式识别", app.image_suffix(GIF_SAMPLE) == "gif")
+check("WebP 格式识别", app.image_suffix(WEBP_SAMPLE) == "webp")
+check("非图片内容被拒绝", app.image_suffix(b"not an image at all") == "")
+check("按内容判断：脚本文件不会被当成图片", app.image_suffix(b"#!/bin/sh\necho hi") == "")
+
+avatar_id = "2029-09-09_090909_000"
+fresh_state(current_session=avatar_id, current_branch="main", session_title="头像测试")
+app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
+app.save_session()
+check("默认没有自定义头像", app.current_avatar("user", avatar_id) is None)
+check("默认没有自定义 AI 头像", app.current_avatar("assistant", avatar_id) is None)
+
+# 上传用户头像（走真实回调路径）
+app.st.session_state["_uploader_user_avatar"] = _FakeUpload(PNG_BYTES)
+app.set_avatar("user_avatar")
+saved_rel = app.st.session_state["user_avatar"]
+check("上传后记录了相对路径", saved_rel and saved_rel.startswith("attachments/"), saved_rel)
+avatar_abs = tmp / avatar_id / saved_rel
+check("图片真的落盘到会话目录", avatar_abs.exists(), str(avatar_abs))
+check("落盘内容与上传一致", avatar_abs.read_bytes() == PNG_BYTES)
+check("current_avatar 返回绝对路径", str(app.current_avatar("user", avatar_id)) == str(avatar_abs.resolve()),
+      app.current_avatar("user", avatar_id))
+check("用户头像不影响 AI 头像", app.current_avatar("assistant", avatar_id) is None)
+
+# 上传 AI 头像
+app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(real_png((0, 255, 0)))
+app.set_avatar("assistant_avatar")
+check("AI 头像也设置成功", app.current_avatar("assistant", avatar_id) is not None)
+check("两个头像互不干扰", app.current_avatar("user", avatar_id) != app.current_avatar("assistant", avatar_id))
+
+# 头像随会话存档
+saved_meta = json.loads(meta_of(avatar_id).read_text(encoding="utf-8"))
+check("头像写进 meta.json", saved_meta.get("user_avatar") == saved_rel, saved_meta.get("user_avatar"))
+check("AI 头像写进 meta.json", (saved_meta.get("assistant_avatar") or "").startswith("attachments/"),
+      saved_meta.get("assistant_avatar"))
+check("头像不进入分支文件（消息里没有它）",
+      "avatar" not in json.dumps(msgs_of(avatar_id), ensure_ascii=False))
+
+# 纯展示：绝不进入请求
+app.st.session_state["message"] = [{"role": "user", "content": "看图吗"}]
+payload = app.build_request_payload()
+serialized = json.dumps(payload, ensure_ascii=False)
+check("请求体里没有头像字段名", "avatar" not in serialized)
+check("请求体里没有 image_url 块", "image_url" not in serialized)
+check("请求历史只有文本 content", all(isinstance(m["content"], str) for m in payload["messages"]),
+      [type(m["content"]).__name__ for m in payload["messages"]])
+check("头像路径不出现在请求里", "attachments/" not in serialized)
+
+# 同一张图重复上传：内容哈希命名 → 复用同一个文件，不重复占空间
+files_before = sorted(p.name for p in app.attachments_dir(avatar_id).glob("*"))
+app.st.session_state["_uploader_user_avatar"] = _FakeUpload(PNG_BYTES)
+app.set_avatar("user_avatar")
+check("同内容图片不重复落盘",
+      sorted(p.name for p in app.attachments_dir(avatar_id).glob("*")) == files_before)
+
+# 超大图与非法格式被拒绝（且不会改动已有设置）
+app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(b"x" * (app.MAX_AVATAR_BYTES + 1))
+app.set_avatar("assistant_avatar")
+check("超过大小限制的头像被拒绝",
+      (json.loads(meta_of(avatar_id).read_text(encoding="utf-8")).get("assistant_avatar") or "").endswith(".png"))
+errors.calls.clear()
+app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(b"totally not an image")
+app.set_avatar("assistant_avatar")
+check("非法格式的头像被拒绝并提示", errors.calls and "格式" in errors.calls[-1], errors.calls[-1:])
+
+# 存档里的路径不可信：越权路径读不到
+app.st.session_state["user_avatar"] = "../../../etc/passwd"
+check("越权头像路径被拒绝", app.avatar_file(avatar_id, "user_avatar") is None)
+app.st.session_state["user_avatar"] = saved_rel  # 还原
+
+# 清除头像：设置没了，但图片文件保留（别的会话可能引用同一张）
+app.clear_avatar("assistant_avatar")
+check("清除后不再显示自定义头像", app.current_avatar("assistant", avatar_id) is None)
+check("清除后仍在存档里记为 None",
+      json.loads(meta_of(avatar_id).read_text(encoding="utf-8")).get("assistant_avatar") is None)
+
+# 每个会话各自记着自己的头像（这正是"每个会话独立"的含义）
+first_id = avatar_id
+app.load_selected_session(first_id)
+check("载入会话后仍是自己设置的头像", app.st.session_state["user_avatar"] == saved_rel,
+      app.st.session_state["user_avatar"])
+app.st.session_state["current_session"] = first_id
+app.new_session()  # 点「新建会话」
+second_id = app.st.session_state["current_session"]
+check("新建会话后头像回到默认", app.st.session_state["user_avatar"] is None)
+# 新会话还没产生对话（只有草稿），此时设置头像不能丢
+app.st.session_state["_uploader_user_avatar"] = _FakeUpload(real_png((0, 0, 255)))
+app.set_avatar("user_avatar")
+second_rel = app.st.session_state["user_avatar"]
+check("新会话（只有草稿）设置头像后立刻生效", app.current_avatar("user") is not None, second_rel)
+check("新会话（只有草稿）的头像写进草稿",
+      json.loads(app.draft_path(second_id).read_text(encoding="utf-8")).get("user_avatar") == second_rel)
+app.load_selected_session(first_id)
+check("切回第一个会话仍是它的头像", app.st.session_state["user_avatar"] == saved_rel,
+      app.st.session_state["user_avatar"])
+app.load_selected_session(second_id)
+check("切到第二个会话是它自己的头像", app.st.session_state["user_avatar"] == second_rel,
+      app.st.session_state["user_avatar"])
+check("同一个用户在不同会话可以是不同头像", saved_rel != second_rel)
+
+# 坏图片/解不开的内容：不能让整个页面崩（st.chat_message 会真去解码图片）
+broken_dir = tmp / avatar_id / "attachments"
+broken_dir.mkdir(parents=True, exist_ok=True)
+# 只有 PNG 文件头、后面是垃圾：连解码都过不去
+(broken_dir / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"this-is-not-a-real-png-body")
+app.st.session_state["user_avatar"] = "attachments/broken.png"
+check("坏图片被 current_avatar 兜住（退回默认头像）",
+      app.current_avatar("user", avatar_id) is None, app.current_avatar("user", avatar_id))
+check("坏图片本身仍能取到路径（只是不拿去渲染）",
+      app.avatar_file(avatar_id, "user_avatar") is not None)
+# 真实图片 + 尾部垃圾：Pillow 本来就容忍（解码只看图片数据本身），
+# 这种情况也不需要拦——Streamlit 同样能正常渲染，所以如实断言它会通过
+(broken_dir / "trailing.png").write_bytes(PNG_BYTES + b"garbage-after-iend")
+app.st.session_state["user_avatar"] = "attachments/trailing.png"
+check("尾部有垃圾但仍可解码的图片照常使用（Pillow 不视其为损坏）",
+      app.current_avatar("user", avatar_id) is not None,
+      app.current_avatar("user", avatar_id))
+app.st.session_state["user_avatar"] = saved_rel  # 还原
+
+app.delete_session(avatar_id)
+app.delete_session(second_id)
 
 # --------------------------------------------------------------------------- #
 # 高级配置：请求参数是否按配置拼装

@@ -6,3 +6,5 @@
 #   openai    >= 1.40 才支持 reasoning_effort 参数与 chat.completions 流式接口
 streamlit>=1.49,<2
 openai>=1.40
+# 校验上传的头像确实是能解码的图片（坏图会让 st.chat_message 直接报错）
+Pillow>=10

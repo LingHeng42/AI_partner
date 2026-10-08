@@ -7,6 +7,7 @@
 """
 
 import datetime
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import streamlit as st
 from openai import OpenAI
+from PIL import Image
 
 # --------------------------------------------------------------------------- #
 # 路径：全部基于脚本自身位置解析，从任何工作目录启动都能找到 sessions/ 与 resources/
@@ -30,6 +32,20 @@ ARCHIVE_DIR = Path(
 #   branches/<分支ID>.json   一条分支 = 一条线性消息列表
 META_FILENAME = "meta.json"
 BRANCHES_SUBDIR = "branches"
+# 头像等会话内图片：<会话目录>/attachments/<内容哈希>.<ext>
+ATTACHMENTS_SUBDIR = "attachments"
+# 对话头像：每个会话独立设置，只影响聊天气泡左侧显示，不会发给模型
+AVATAR_KEYS = ("user_avatar", "assistant_avatar")
+AVATAR_LABELS = {"user_avatar": "我的头像", "assistant_avatar": "AI 头像"}
+# 头像支持的图片格式（按文件内容判断，不看扩展名）
+IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+IMAGE_MIME = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 头像这类小图给 5 MiB 足够
 # 草稿目录：给"还没产生对话"的会话存人设/高级参数，不进会话历史
 DRAFTS_DIR = ARCHIVE_DIR / "drafts"
 RESOURCES_DIR = BASE_DIR / "resources"
@@ -124,6 +140,109 @@ def branch_path(session_name: str, branch_id: str) -> Path:
     return branches_dir(session_name) / f"{branch_id}.json"
 
 
+def attachments_dir(session_name: str) -> Path:
+    """会话内的图片目录（头像等），与分支文件同级。"""
+    return _session_dir(session_name) / ATTACHMENTS_SUBDIR
+
+
+def image_suffix(data: bytes) -> str:
+    """按文件内容判断图片格式；不认识的格式返回空串（调用方据此拒绝）。"""
+    for signature, suffix in IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return suffix
+    # WebP: RIFF....WEBP
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
+def store_image(session_name: str, data: bytes, suffix: str) -> str:
+    """把图片按内容哈希存进会话的 attachments 目录，返回相对会话目录的路径。
+
+    用内容哈希命名：同一张图重复上传天然去重，也不会互相覆盖。
+    """
+    digest = hashlib.sha1(data).hexdigest()[:16]
+    relative = f"{ATTACHMENTS_SUBDIR}/{digest}.{suffix}"
+    target = attachments_dir(session_name) / f"{digest}.{suffix}"
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return relative
+
+
+def avatar_file(session_name: str, key: str):
+    """某个角色的头像文件绝对路径；没设置过返回 None。"""
+    relative = st.session_state.get(key)
+    if not relative:
+        return None
+    try:
+        base = _session_dir(session_name)
+    except ValueError:
+        return None
+    candidate = (base / relative).resolve()
+    # 只允许读会话目录内的文件（存档里的路径不可信）
+    if base.resolve() not in candidate.parents or not candidate.is_file():
+        return None
+    return candidate
+
+
+def current_avatar(role: str, session_name: str = None):
+    """给 st.chat_message 用的头像参数（本地绝对路径）；没有可用头像时返回 None。
+
+    "可用"要真的验证过：文件存在还不够——损坏的图片、或 Streamlit 解不开的格式
+    会让 st.chat_message 直接抛错并打断整个页面。这里**真正解码一遍**再交给它
+    （只做 verify() 不够：它不校验数据是否真的能解出来），坏图退回默认头像，
+    保证页面永远能渲染出来。
+    """
+    key = "user_avatar" if role == "user" else "assistant_avatar"
+    path = avatar_file(session_name or st.session_state.get("current_session"), key)
+    if path is None:
+        return None
+    try:
+        with Image.open(path) as probe:
+            probe.load()  # 完整解码，坏图会在这里抛错
+    except Exception:  # noqa: BLE001 - 坏图/不支持的格式一律退回默认头像
+        return None
+    return path
+
+
+def set_avatar(key: str) -> None:
+    """头像上传回调：校验图片 → 落盘到会话目录 → 记进内存与存档。
+
+    作为 st.file_uploader 的 on_change 回调执行（回调先于控件实例化），
+    所以这里改 *_avatar 这类普通状态键是安全的。上传的文件从控件自己的
+    session_state 里读（不通过 args 传：args 是渲染时求值的，那时还没选文件）。
+    """
+    uploaded = st.session_state.get(f"_uploader_{key}")
+    if uploaded is None:
+        return
+    data = uploaded.getvalue()
+    session_name = st.session_state.get("current_session")
+    if not session_name:
+        return
+    if len(data) > MAX_AVATAR_BYTES:
+        st.error(f"图片太大（{len(data) / 1024 / 1024:.1f} MB），请压缩到 5 MB 以内")
+        return
+    suffix = image_suffix(data)
+    if not suffix:
+        st.error("无法识别的图片格式，请上传 PNG / JPEG / GIF / WebP")
+        return
+    try:
+        st.session_state[key] = store_image(session_name, data, suffix)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"保存头像失败: {e}")
+        return
+    save_session()  # 立刻落盘（有对话进 meta.json，没对话进草稿）
+
+
+def clear_avatar(key: str) -> None:
+    """清除头像（只清设置，图片文件留在附件目录里不删，避免误删别的引用）。"""
+    st.session_state[key] = None
+    # 上传控件带着上次的文件，必须清掉它的状态，否则下一次重跑又会把旧图写回来
+    st.session_state[f"_uploader_{key}"] = None
+    save_session()
+
+
 def session_dir_exists(session_name: str) -> bool:
     """会话是否已经以新结构（目录 + meta.json）存过盘。"""
     try:
@@ -195,7 +314,12 @@ def _legacy_meta(session_name: str, flat: Path) -> dict:
 
 
 def normalize_branches(raw) -> list:
-    """把 branches 字段规整成 [{id, parent, fork_index, created_at}]。"""
+    """把 branches 字段规整成 [{id, parent, fork_index, created_at}]，并按创建时间排序。
+
+    为什么按创建时间排而不是按 ID 排：分支 ID 可能比创建顺序"忽大忽小"
+    （删掉中间一条后，新分支会补上那个空缺的 ID），只按 ID 排会显得很乱。
+    创建时间相同或缺失的（例如从旧存档迁移过来的）保持原有顺序（稳定排序）。
+    """
     out = []
     for item in raw or []:
         if isinstance(item, str):
@@ -207,7 +331,11 @@ def normalize_branches(raw) -> list:
                 "fork_index": item.get("fork_index"),
                 "created_at": item.get("created_at") or "",
             })
-    return out or [_branch("main")]
+    if not out:
+        return [_branch("main")]
+    known = [b for b in out if b["created_at"]]
+    unknown = [b for b in out if not b["created_at"]]
+    return sorted(known, key=lambda b: b["created_at"]) + unknown
 
 
 def branch_ids(session_name: str) -> list:
@@ -385,6 +513,13 @@ def reset_profile() -> None:
     st.session_state.message = []
 
 
+def reset_avatar() -> None:
+    """把对话头像恢复成默认（新建/删除会话时用；图片文件留在附件目录里不删）。"""
+    for key in AVATAR_KEYS:
+        st.session_state[key] = None
+        st.session_state[f"_uploader_{key}"] = None
+
+
 def draft_path(session_name: str = None):
     """草稿文件路径：给"还没产生对话"的会话存人设与高级参数。"""
     name = session_name or st.session_state.get("current_session")
@@ -393,13 +528,29 @@ def draft_path(session_name: str = None):
     return DRAFTS_DIR / f"{name}.draft"
 
 
+def append_draft(data: dict) -> None:
+    """把内容合并进草稿（保留草稿里已有的字段，比如刚设的头像）。"""
+    path = draft_path()
+    if path is None:
+        return
+    merged = {}
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                merged = json.load(f)
+        except Exception:  # noqa: BLE001 - 草稿损坏时按空处理
+            merged = {}
+    merged.update(data)
+    _write_json_atomic(path, merged)
+
+
 def save_draft(data: dict) -> None:
     """把人设/高级参数立刻写进草稿文件（不进会话历史）。"""
     path = draft_path()
     if path is None:
         return
     if not data.get("message"):
-        _write_json_atomic(path, data)
+        append_draft(data)
 
 
 def discard_draft(session_name: str = None) -> None:
@@ -446,6 +597,7 @@ def save_session() -> None:
             "message": [],
             **profile_from_state(),
             **advanced_from_state(),
+            **avatar_from_state(),
         })
         return
     migrate_session(session_name)
@@ -460,9 +612,10 @@ def save_session() -> None:
         meta["branches"] = normalize_branches([*existing, _branch(branch_id)])
         ids.append(branch_id)
     meta["current_branch"] = branch_id
-    # 人设与高级参数是会话级的一套，跟着 meta 走
+    # 人设、高级参数与头像是会话级的一套，跟着 meta 走
     meta.update(profile_from_state())
     meta.update(advanced_from_state())
+    meta.update(avatar_from_state())
     write_branch(session_name, branch_id, {"message": messages})
     write_session_meta(session_name, meta)
     discard_draft()
@@ -522,12 +675,17 @@ def is_fresh_session() -> bool:
 # 编辑消息 / 重新生成都通过 fork_branch() 新建一条分支，原分支保留可切回。
 # --------------------------------------------------------------------------- #
 def next_branch_id(session_name: str) -> str:
-    """给新分支取一个不冲突的 ID：b2、b3……（main 永远是第一条）。"""
-    taken = set(branch_ids(session_name))
-    index = 2
-    while f"b{index}" in taken:
-        index += 1
-    return f"b{index}"
+    """给新分支取新 ID：b2、b3……，只增不减（不复用被删掉的编号）。
+
+    不复用是为了让"分支 ID 的大小顺序"和"创建先后顺序"一致：
+    否则删掉中间一条后，新分支会顶替那个编号，列表里看起来像是乱序。
+    """
+    highest = 1  # main 视作第 1 条
+    for branch in branch_ids(session_name):
+        suffix = branch[1:]
+        if branch.startswith("b") and suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"b{highest + 1}"
 
 
 def branch_siblings(session_name: str, branch_id: str) -> list:
@@ -663,6 +821,10 @@ def load_selected_session(session_name: str) -> None:
         draft = draft_path(session_name)
         has_draft = draft is not None and draft.exists()
         if not has_archive and not has_draft:
+            # 还没有任何存档的会话（比如刚新建的 ID）：当成全新会话，
+            # 显式重置人设与头像，避免上一个会话的设置"漏"过来
+            reset_profile()
+            reset_avatar()
             return
         if has_archive:
             meta = load_session_meta(session_name)
@@ -681,6 +843,9 @@ def load_selected_session(session_name: str) -> None:
             st.session_state[key] = restore.get(key) or default
         # 高级参数跟着会话走；老存档没这些字段就回退成默认值
         apply_advanced(restore)
+        # 头像同样是会话级的一套；老存档没这个字段就回落成默认头像
+        for key in AVATAR_KEYS:
+            st.session_state[key] = restore.get(key) or None
         # 会话名称与置顶状态；老存档没这些字段就回退成默认值
         st.session_state.session_title = (restore.get("title") or "").strip() or session_name
         st.session_state.session_pinned = bool(restore.get("pinned"))
@@ -720,6 +885,8 @@ def new_session() -> None:
     st.session_state.session_title = DEFAULT_SESSION_TITLE
     st.session_state.session_pinned = False
     st.session_state.current_branch = "main"
+    # 头像是每个会话独立设置的：新会话从默认头像开始
+    reset_avatar()
     save_session()
 
 
@@ -736,6 +903,7 @@ def delete_session(session_name: str) -> None:
         if session_name == st.session_state.get("current_session"):
             reset_profile()
             _reset_advanced()
+            reset_avatar()
             st.session_state.current_session = new_session_id()
             st.session_state.session_title = DEFAULT_SESSION_TITLE
             st.session_state.session_pinned = False
@@ -810,6 +978,14 @@ def advanced_value(name: str):
 def advanced_from_state() -> dict:
     """当前的高级生成参数快照（存进会话存档用）。"""
     return {key: st.session_state.get(key, DEFAULT_ADVANCED[key]) for key in ADVANCED_KEYS}
+
+
+def avatar_from_state() -> dict:
+    """当前会话的头像设置快照（每个会话独立，存进会话存档用）。
+
+    注意：头像是纯展示用的，**不会**进入请求，也不会发给模型。
+    """
+    return {key: st.session_state.get(key) for key in AVATAR_KEYS}
 
 
 def apply_advanced(data: dict) -> None:
@@ -929,7 +1105,7 @@ def generate_reply(placeholder, messages: list) -> tuple:
                             reasoning_text.markdown("_（本次没有输出推理内容）_")
                     yield content_piece
 
-        with placeholder.chat_message("assistant"):
+        with placeholder.chat_message("assistant", avatar=current_avatar("assistant")):
             if thinking_enabled:
                 with reasoning_expander("reasoning_panel", "show_reasoning", True):
                     reasoning_text = st.empty()
@@ -1058,7 +1234,7 @@ def render_history() -> None:
     siblings = branch_siblings(st.session_state.current_session, branch) if session_file_exists() else [branch]
     last = len(st.session_state.message) - 1
     for index, msg in enumerate(st.session_state.message):
-        with st.chat_message(msg["role"]):
+        with st.chat_message(msg["role"], avatar=current_avatar(msg["role"])):
             if msg.get("reasoning_content"):
                 with reasoning_expander(f"history_reasoning_{branch}_{index}",
                                         f"history_reasoning_open_{branch}_{index}", False):
@@ -1177,6 +1353,9 @@ for _key, _value in DEFAULT_ADVANCED.items():
 st.session_state.setdefault("message", [])
 st.session_state.setdefault("thinking", False)
 st.session_state.setdefault("session_title", DEFAULT_SESSION_TITLE)
+# 对话头像：每个会话独立，未设置时为 None（用 Streamlit 的默认头像）
+for _key in AVATAR_KEYS:
+    st.session_state.setdefault(_key, None)
 # 当前所在分支（一条分支 = 一条线性消息列表；切换分支就是整体换掉 message）
 st.session_state.setdefault("current_branch", "main")
 # 内存里的 message 属于哪条分支（渲染时据此判断要不要从磁盘重载）
@@ -1367,6 +1546,36 @@ with st.sidebar:
 
     st.divider()
 
+    # 对话头像：每个会话独立设置，只影响聊天气泡左侧的显示，**不会发给模型**
+    st.subheader("对话头像")
+    for _key in AVATAR_KEYS:
+        _current = avatar_file(st.session_state.current_session, _key)
+        if _current is not None:
+            _preview_col, _text_col = st.columns([1, 3], vertical_alignment="center")
+            with _preview_col:
+                st.image(str(_current), width=48)
+            with _text_col:
+                st.caption(f"已设置{AVATAR_LABELS[_key]}")
+        st.file_uploader(
+            AVATAR_LABELS[_key],
+            type=["png", "jpg", "jpeg", "gif", "webp"],
+            key=f"_uploader_{_key}",
+            on_change=set_avatar,
+            args=(_key,),
+            help="只改变这个会话里的显示，图片保存在该会话的存档目录里。",
+        )
+        if _current is not None:
+            st.button(
+                f"清除{AVATAR_LABELS[_key]}",
+                key=f"clear_avatar_{_key}",
+                width="stretch",
+                icon=":material/hide_image:",
+                on_click=clear_avatar,
+                args=(_key,),
+            )
+
+    st.divider()
+
     # 角色管理：控件 key 直接就是状态键；on_change 里立刻落盘，
     # 不需要手动回写（回写会在控件实例化后改同名 session_state 而报错）
     st.subheader("管理角色")
@@ -1449,6 +1658,6 @@ prompt = st.chat_input(
 
 if prompt:
     st.session_state.message.append({"role": "user", "content": prompt})  # 用户输入入列
-    st.chat_message("user").write(prompt)
+    st.chat_message("user", avatar=current_avatar("user")).write(prompt)
     # 复用同一个占位符，避免每个 chunk 都重建组件
     render_reply(st.empty())

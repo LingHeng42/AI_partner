@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -32,6 +33,24 @@ TMP_DIR = TESTS_DIR / ".tmp"
 # 被拒（Access is denied），那层目录删不掉。用独立名字就不用依赖删除成功——
 # 旧目录即使残留也不会影响本次运行。
 SESSIONS_DIR = TMP_DIR / f"sessions_{os.getpid()}"
+
+
+def real_png(pixel=(255, 0, 0)) -> bytes:
+    """生成一张 1×1 的真实合法 PNG。
+
+    测试里不能用"魔数 + 随便几个字节"的假图片：应用会用 Pillow 校验头像，
+    假图片会被正确判定为坏图（那条兜底逻辑本身也有测试覆盖）。
+    """
+    import struct as _struct
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (_struct.pack(">I", len(payload)) + tag + payload
+                + _struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    ihdr = _struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)  # 1×1, 8bit truecolor
+    raw = b"\x00" + bytes(pixel)  # 每行前面一个 filter 字节
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
 def _run(cmd: list) -> None:
@@ -113,11 +132,20 @@ sys.dont_write_bytecode = True
 
 # 解释器退出时 tempfile 会去删自己登记过的临时目录；沙箱建的目录带
 # "Everyone 拒绝删除" ACL，删不掉就抛 PermissionError，把进程退出码弄成 1
-# （断言全过却"失败"）。这里直接卸掉这个清理钩子。
+# （断言全过却"失败"）。这里既卸掉模块级清理钩子，也摘掉每个 TemporaryDirectory
+# 自己的终结器（它不经过 _cleanup，会走临时目录的 finalizer）。
 try:
     import tempfile as _tempfile
 
     _tempfile._cleanup = lambda *a, **k: None
+
+    class _NoCleanupTemporaryDirectory(_tempfile.TemporaryDirectory):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # 摘掉"退出时删除自己"的终结器，避免删不掉时抛异常
+            self._finalizer.detach()
+
+    _tempfile.TemporaryDirectory = _NoCleanupTemporaryDirectory
 except Exception:  # noqa: BLE001
     pass
 

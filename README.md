@@ -7,6 +7,7 @@
 - **角色扮演对话**：昵称 / 性格 / 角色简介 / 输出规则四项人设实时生效，注入 system prompt
 - **深度思考 + 可折叠思考过程**：侧边栏一键切换；开启后模型的推理内容流式显示在「思考过程」折叠面板里（思考中显示微光提示），推理内容随会话存档，重开对话后仍可展开回看
 - **重新生成与分支**：任意一条回答都能「重新生成」，任意一条消息（用户或 AI）都能「编辑」并从该处重新生成；每次重新生成/编辑都会**新建一条分支**并保留原分支，可在侧边栏分支区或回答气泡的 `‹ 2/3 ›` 箭头之间切换、改名、删除
+- **自定义对话头像**：侧边栏 `对话头像` 区可分别上传「我的头像」与「AI 头像」，**每个会话独立**（跟着该会话的存档走，新建会话回到默认头像）；图片按内容哈希存进该会话的存档目录，支持 PNG / JPEG / GIF / WebP，并会校验确实是能解码的图片（坏图自动退回默认头像，不会白屏）。**头像纯展示，不会发给模型**
 - **高级配置**：侧边栏 `⚙️ 高级配置` 按钮展开，可调温度、top_p、重复惩罚、话题新鲜度，并可选择是否限制单次回复长度（max_tokens）
 - **流式输出**：边生成边显示（正文交给 `st.write_stream`），回答生成期间输入框自动禁用，避免误触打断
 - **本地会话存档**：会话 ID（时间戳）既是存档目录名也是分支文件的父目录，显示用的是可自定义的**会话名称**，支持新建 / 切换 / 二次确认删除；**空对话不落盘也不进历史**，有第一条消息后才出现
@@ -47,15 +48,16 @@ requirements.txt     依赖清单
 
 ## 测试
 
-四个测试套件都不联网，也不会碰真实的 `sessions/`（它们用 `AI_PARTNER_SESSIONS_DIR`
+五个测试套件都不联网，也不会碰真实的 `sessions/`（它们用 `AI_PARTNER_SESSIONS_DIR`
 把存档目录指到 `tests/.tmp` 下的隔离目录）：
 
 ```bash
-.venv\Scripts\python.exe tests\run_tests.py          # 一次跑完四个套件（各起独立进程）
+.venv\Scripts\python.exe tests\run_tests.py          # 一次跑完五个套件（各起独立进程）
 .venv\Scripts\python.exe tests\test_logic.py         # 存档 / 分支 / 分叉 / 上下文截断 / 对话流程
 .venv\Scripts\python.exe tests\test_smoke.py         # 页面渲染 / 空会话不建档 / 新建会话高亮
 .venv\Scripts\python.exe tests\test_row_render.py    # 会话条目与「⋯」操作菜单渲染 / 回车重命名
 .venv\Scripts\python.exe tests\test_branch_ui.py     # 侧边栏分支区渲染 / 消息操作入口
+.venv\Scripts\python.exe tests\test_avatar_ui.py     # 对话头像：侧边栏入口 / 气泡头像 / 随会话独立
 .venv\Scripts\python.exe tests\clean_tmp.py          # 清掉测试临时目录 tests/.tmp
 ```
 
@@ -72,9 +74,10 @@ requirements.txt     依赖清单
 
 ```
 sessions/<会话ID>/
-  meta.json                  会话级信息：名称 / 置顶 / 当前分支 / 分支列表 / 人设 / 高级参数
+  meta.json                  会话级信息：名称 / 置顶 / 当前分支 / 分支列表 / 人设 / 高级参数 / 头像
   branches/main.json         一条分支 = 一条线性消息列表
   branches/b2.json
+  attachments/<内容哈希>.png  对话头像（按内容哈希命名，重复上传同一张图不会重复占空间）
 sessions/drafts/<会话ID>.draft   还没产生对话时的草稿
 ```
 
@@ -89,6 +92,8 @@ sessions/drafts/<会话ID>.draft   还没产生对话时的草稿
     {"id": "main", "parent": null, "fork_index": null, "created_at": "2026-01-01T12:00:00"},
     {"id": "b2", "parent": "main", "fork_index": 3, "created_at": "2026-01-01T12:05:00"}
   ],
+  "user_avatar": "attachments/1f3c9ab77e0d1234.png",
+  "assistant_avatar": null,
   "nickname": "溟月",
   "nature": "聪明但很懒，傲娇嘴甜，酷爱白米饭",
   "role_description": "溟月是一位拥有蓝色长发和蓝色眼睛的少女……",
@@ -139,6 +144,7 @@ sessions/drafts/<会话ID>.draft   还没产生对话时的草稿
 > - 四大人设字段与 `AI_partner.py` 里的 `DEFAULT_PROFILE` 一一对应，字段缺失时按默认值回填；昵称字段名为 `nickname`（历史版本里的拼写错误 `nike_name` 已废弃）。
 > - 六个高级生成参数与 `DEFAULT_ADVANCED` 一一对应，是**整会话一套**（不随分支变化）：切回某个会话时会恢复它自己的这套参数；老存档没有这些字段就按默认值来。
 > - `reasoning_content` 只在开启深度思考时出现，用于回放折叠的思考过程；请求时会一并回传给 API（服务端会忽略它，且不计入上下文长度）。
+> - `user_avatar` / `assistant_avatar` 是**会话级**的对话头像（相对会话目录的路径），只用于聊天气泡左侧的显示，**不会进入请求、也不会发给模型**；路径越出会话目录或图片无法解码时一律退回默认头像。
 > - **旧格式兼容**：`sessions/<会话ID>.json` 这种扁平存档仍能直接读取（当作单分支 `main`，只读、不改动你的文件）；一旦有写操作（发消息、改名、置顶等）就会自动迁移成新目录结构，旧文件随即删除。
 
 ## 高级配置说明
