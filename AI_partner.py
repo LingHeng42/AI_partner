@@ -1037,9 +1037,13 @@ def render_pending_regen() -> None:
     st.session_state.pending_regen = False
     full_response, reasoning = generate_reply(st.empty(), st.session_state.message)
     remember_reply(full_response, reasoning)
-    # 生成成功才落盘：失败时保留"前缀+分叉点内容"这个状态，用户可以直接重试
-    if full_response:
-        save_session()
+    if not full_response:
+        # 生成失败：保留"前缀 + 分叉点内容"这个状态，用户可以直接重试
+        return
+    save_session()
+    # 历史是在脚本顶部渲染的，那时这条新回答还没生成：不重跑一次的话，
+    # 它会带着内容显示出来、但没有下面的 ⋯ 操作入口（要刷新才出现）。
+    st.rerun()
 
 
 def render_history() -> None:
@@ -1121,7 +1125,8 @@ def render_history() -> None:
                         nav = st.columns([1, 2, 1], vertical_alignment="center")
                         with nav[0]:
                             st.button(
-                                "", key=f"branch_prev_{branch}", icon=":material/chevron_left:",
+                                "", key=f"branch_prev_{branch}_{index}",
+                                icon=":material/chevron_left:",
                                 help=f"切到 {prev_branch}", on_click=switch_branch,
                                 args=(st.session_state.current_session, prev_branch),
                             )
@@ -1129,7 +1134,8 @@ def render_history() -> None:
                             st.caption(f"分支 {position + 1}/{len(siblings)}")
                         with nav[2]:
                             st.button(
-                                "", key=f"branch_next_{branch}", icon=":material/chevron_right:",
+                                "", key=f"branch_next_{branch}_{index}",
+                                icon=":material/chevron_right:",
                                 help=f"切到 {next_branch}", on_click=switch_branch,
                                 args=(st.session_state.current_session, next_branch),
                             )

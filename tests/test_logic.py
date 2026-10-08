@@ -1081,6 +1081,30 @@ app.render_reply(_Sink())
 check("无消息时不落盘", session_dirs() == [], session_dirs())
 check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)
 
+# 场景 5：重新生成成功后要重跑一次，否则新回答下面没有 ⋯ 操作入口
+#        （render_history 在脚本顶部就渲染完了，新回答是之后才追加的）
+reruns.calls.clear()
+_clear_sessions()
+app.st.session_state["current_session"] = "2099-04-07_000000_000"
+app.st.session_state["current_branch"] = "main"
+app.st.session_state["message"] = [{"role": "user", "content": "问题"}]
+app.st.session_state["pending_regen"] = True
+app.client = FakeClient(completions=FakeCompletions(chunks=["重生成的回答"]))
+app.render_pending_regen()
+check("重新生成成功后重跑一次（让 ⋯ 立刻出现）", len(reruns.calls) == 1, reruns.calls)
+check("重跑前回答已落盘",
+      [m["content"] for m in msgs_of("2099-04-07_000000_000")] == ["问题", "重生成的回答"],
+      msgs_of("2099-04-07_000000_000"))
+# 生成失败（空回答）→ 不落盘也不重跑，保留可重试的状态
+reruns.calls.clear()
+app.st.session_state["pending_regen"] = True
+app.client = FakeClient(completions=FakeCompletions(empty=True))
+app.render_pending_regen()
+check("重新生成失败时不重跑", len(reruns.calls) == 0, reruns.calls)
+check("重新生成失败时保留原分支内容",
+      [m["content"] for m in msgs_of("2099-04-07_000000_000")] == ["问题", "重生成的回答"],
+      msgs_of("2099-04-07_000000_000"))
+
 app.st.rerun = _Sink()
 check("session_file_exists 能正确判断", app.session_file_exists("no-such") is False)
 

@@ -60,6 +60,9 @@ for _d in list(FAKE_SESSIONS.iterdir()):
         shutil.rmtree(_d, ignore_errors=True)
 SESSION_DIR = FAKE_SESSIONS / SESSION_ID
 (SESSION_DIR / "branches").mkdir(parents=True, exist_ok=True)
+# b2 与 b3 都从 main 的第 1 条分出来 → 互为兄弟分支（气泡里会出现 ‹ 2/3 › 箭头）。
+# 这正是曾经触发 StreamlitDuplicateElementKey 的场景：箭头曾只按"当前分支"命名 key，
+# 而它们是在每条消息的循环里渲染的，第二条消息就撞上了第一条的 key。
 (SESSION_DIR / "meta.json").write_text(json.dumps({
     "title": "分支渲染检查",
     "pinned": False,
@@ -67,20 +70,18 @@ SESSION_DIR = FAKE_SESSIONS / SESSION_ID
     "branches": [
         {"id": "main", "parent": None, "fork_index": None, "created_at": ""},
         {"id": "b2", "parent": "main", "fork_index": 1, "created_at": ""},
+        {"id": "b3", "parent": "main", "fork_index": 1, "created_at": ""},
     ],
     "nickname": "溟月",
     "nature": "测试性格",
     "role_description": "测试简介",
     "output_rules": "测试规则",
 }, ensure_ascii=False), encoding="utf-8")
-(SESSION_DIR / "branches" / "main.json").write_text(
-    json.dumps({"message": [{"role": "user", "content": "问题"},
-                            {"role": "assistant", "content": "main 的回答"}]}, ensure_ascii=False),
-    encoding="utf-8")
-(SESSION_DIR / "branches" / "b2.json").write_text(
-    json.dumps({"message": [{"role": "user", "content": "问题"},
-                            {"role": "assistant", "content": "b2 的回答"}]}, ensure_ascii=False),
-    encoding="utf-8")
+for branch, answer in (("main", "main 的回答"), ("b2", "b2 的回答"), ("b3", "b3 的回答")):
+    (SESSION_DIR / "branches" / f"{branch}.json").write_text(
+        json.dumps({"message": [{"role": "user", "content": "问题"},
+                                {"role": "assistant", "content": answer}]}, ensure_ascii=False),
+        encoding="utf-8")
 
 wrapper = TMP_DIR / "_branch_wrapper.py"
 wrapper.write_text(
@@ -107,13 +108,25 @@ buttons = [b.label for b in at.button]
 
 check("页面无异常启动", not at.exception, [e.message for e in at.exception])
 check("应用脚本确实被执行", at.session_state.get("_branch_render_ran") is True)
-check("侧边栏出现分支区（含数量）", any("分支（2）" == s.value for s in at.subheader),
+check("侧边栏出现分支区（含数量）", any("分支（3）" == s.value for s in at.subheader),
       [s.value for s in at.subheader])
-check("两条分支都渲染成按钮", "main" in buttons and "b2" in buttons, buttons)
+check("三条分支都渲染成按钮", all(b in buttons for b in ("main", "b2", "b3")), buttons)
 check("当前分支按钮为高亮", any(b.label == "b2" and b.proto.type == "primary" for b in at.button),
-      [(b.label, b.proto.type) for b in at.button if b.label in ("main", "b2")])
+      [(b.label, b.proto.type) for b in at.button if b.label in ("main", "b2", "b3")])
 check("非当前分支不高亮", any(b.label == "main" and b.proto.type != "primary" for b in at.button),
-      [(b.label, b.proto.type) for b in at.button if b.label in ("main", "b2")])
+      [(b.label, b.proto.type) for b in at.button if b.label in ("main", "b2", "b3")])
+# 兄弟分支（b2 与 b3 同源）会在每轮消息下渲染切换箭头。这里是最容易复现
+# StreamlitDuplicateElementKey 的地方：箭头 key 曾只按"当前分支"命名，
+# 而它们是在消息循环里渲染的，第二条消息就和第一条撞 key 了。
+check("同一分叉点的兄弟分支会渲染出切换箭头",
+      any(b.proto.icon and "chevron" in b.proto.icon for b in at.button),
+      [(b.label, b.proto.icon) for b in at.button])
+check("每轮消息都渲染了分支计数（说明两轮都有箭头）",
+      sum(1 for c in at.caption if (c.value or "").startswith("分支 ")) == 2,
+      [c.value for c in at.caption])
+check("箭头 key 带消息序号（修复重复 key）",
+      'key=f"branch_prev_{branch}_{index}"' in (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+      and 'key=f"branch_next_{branch}_{index}"' in (PROJECT / "AI_partner.py").read_text(encoding="utf-8"))
 check("分支菜单里含重命名输入框", "重命名分支" in [t.label for t in at.text_input],
       [t.label for t in at.text_input])
 check("分支菜单里含删除按钮", any(label == "删除分支" for label in buttons), buttons)
@@ -127,7 +140,6 @@ check("分支控件 key 带会话 ID 与分支名",
 # --------------------------------------------------------------------------- #
 # 每条消息都有操作入口（编辑这条；最后一条回答额外有重新生成）
 # --------------------------------------------------------------------------- #
-msg_menus = [k for k in ("main", "b2") if True]
 check("消息操作菜单渲染出来（气泡里的 ⋯）", any(b.label == "编辑这条" for b in at.button), buttons)
 check("最后一条回答有「重新生成」", any(b.label == "重新生成" for b in at.button), buttons)
 check("编辑入口每轮消息都有",
