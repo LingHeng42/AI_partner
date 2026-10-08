@@ -448,6 +448,114 @@ check("删除会话后目录连同分支一起消失", not (tmp / mig_id).exists
 app.delete_session("2002-03-04_050607_000")
 check("删除会话时草稿一起清掉", not draft_of_deleted.exists(), str(draft_of_deleted))
 
+# --------------------------------------------------------------------------- #
+# 分支操作：新建 / 切换 / 改名 / 删除
+# --------------------------------------------------------------------------- #
+bsid = "2010-01-01_000000_000"
+app.st.session_state["current_session"] = bsid
+app.st.session_state["session_title"] = "分支测试"
+app.st.session_state["current_branch"] = "main"
+app.st.session_state["message"] = [{"role": "user", "content": "问题"},
+                                   {"role": "assistant", "content": "回答 A"}]
+app.save_session()
+check("分支会话建立", app.branch_ids(bsid) == ["main"], app.branch_ids(bsid))
+
+# fork：从"第 2 条之前"分叉，带一条 seed（编辑消息的场景）
+new_branch = app.fork_branch(bsid, prefix=[{"role": "user", "content": "问题"}],
+                             seed={"role": "assistant", "content": "回答 B"},
+                             parent="main", fork_index=1)
+check("新分支 ID 自动递增", new_branch == "b2", new_branch)
+check("新分支出现在分支表里", app.branch_ids(bsid) == ["main", "b2"], app.branch_ids(bsid))
+check("新分支写入自己的文件", msgs_of(bsid, "b2") == [{"role": "user", "content": "问题"},
+                                                      {"role": "assistant", "content": "回答 B"}])
+check("原分支消息未被改动", msgs_of(bsid, "main")[1]["content"] == "回答 A")
+check("fork 后当前分支切到新分支",
+      json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "b2")
+check("分支记下父分支与分叉点",
+      [(b["parent"], b["fork_index"]) for b in app.load_session_meta(bsid)["branches"] if b["id"] == "b2"]
+      == [("main", 1)])
+check("兄弟分支识别", app.branch_siblings(bsid, "b2") == ["b2"], app.branch_siblings(bsid, "b2"))
+
+# 再 fork 一条同源分支 → 成为兄弟
+third = app.fork_branch(bsid, prefix=[{"role": "user", "content": "问题"}],
+                        seed={"role": "assistant", "content": "回答 C"},
+                        parent="main", fork_index=1)
+check("第三条分支 ID 继续递增", third == "b3", third)
+check("同源分支互为兄弟", sorted(app.branch_siblings(bsid, "b2")) == ["b2", "b3"],
+      app.branch_siblings(bsid, "b2"))
+
+# 切换分支：写磁盘指针（内存里的消息由渲染时"以磁盘为准"重载，见下面"重新进入会话"那组断言）
+app.st.session_state["current_session"] = bsid
+app.st.session_state["current_branch"] = "main"
+app.st.session_state["message"] = msgs_of(bsid, "main")
+app.switch_branch(bsid, "b3")
+check("切换后状态记录当前分支", app.st.session_state["current_branch"] == "b3")
+check("切换后磁盘指针也更新",
+      json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "b3")
+check("切换目标分支的消息仍在磁盘上", msgs_of(bsid, "b3")[1]["content"] == "回答 C")
+check("切换不存在的分支会被拒绝", (lambda: (app.switch_branch(bsid, "nope"),
+                                      app.load_session_meta(bsid)["current_branch"] == "b3")[1])())
+
+# 改名：分支文件跟着重命名，指针同步
+app.st.session_state["current_branch"] = "b3"
+app.rename_branch(bsid, "b3", "毒舌版")
+check("改名后分支表更新", app.branch_ids(bsid) == ["main", "b2", "毒舌版"], app.branch_ids(bsid))
+check("改名后旧文件消失", not (tmp / bsid / "branches" / "b3.json").exists())
+check("改名后新文件出现且内容不变", msgs_of(bsid, "毒舌版")[1]["content"] == "回答 C")
+check("改名后指针跟着改",
+      json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "毒舌版")
+check("改名后内存状态跟着改", app.st.session_state["current_branch"] == "毒舌版")
+old_state = app.st.session_state["current_branch"]
+app.rename_branch(bsid, "b2", "main")  # 重名应被拒绝
+check("分支改名不能重名", app.branch_ids(bsid) == ["main", "b2", "毒舌版"], app.branch_ids(bsid))
+check("分支改名不能带路径", (lambda: (app.rename_branch(bsid, "b2", "../evil"),
+                                 app.branch_ids(bsid) == ["main", "b2", "毒舌版"])[1])())
+
+# 删除：删当前分支要跳到父分支；只剩一条时拒绝
+app.delete_branch(bsid, "毒舌版")
+check("删除当前分支后跳回父分支",
+      json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "main",
+      json.loads(meta_of(bsid).read_text(encoding="utf-8")).get("current_branch"))
+check("删除后分支文件消失", not (tmp / bsid / "branches" / "毒舌版.json").exists())
+check("删除后状态同步", app.st.session_state["current_branch"] == "main")
+app.delete_branch(bsid, "b2")
+check("删到只剩 main", app.branch_ids(bsid) == ["main"], app.branch_ids(bsid))
+app.delete_branch(bsid, "main")
+check("只剩一条分支时拒绝删除", app.branch_ids(bsid) == ["main"], app.branch_ids(bsid))
+
+# 删父分支：子分支改挂到祖父上（不能断链）
+sub_parent = app.fork_branch(bsid, prefix=[{"role": "user", "content": "分支上的问题"}],
+                             seed={"role": "assistant", "content": "分支上的回答"},
+                             parent="main", fork_index=1)
+sub_child = app.fork_branch(bsid, prefix=msgs_of(bsid, sub_parent),
+                            seed={"role": "assistant", "content": "更深一层"},
+                            parent=sub_parent, fork_index=2)
+app.delete_branch(bsid, sub_parent)
+deep = [b for b in app.load_session_meta(bsid)["branches"] if b["id"] == sub_child]
+check("删父分支后子分支改挂到祖父", deep and deep[0]["parent"] == "main", deep)
+check("删父分支后子分支文件仍在", (tmp / bsid / "branches" / f"{sub_child}.json").exists())
+
+# 「再次进入会话时进入正确分支」：把指针指到非 main 的那条，重新载入会话
+target = app.branch_ids(bsid)[-1]
+meta_now = app.load_session_meta(bsid)
+meta_now["current_branch"] = target
+app.write_session_meta(bsid, meta_now)
+app.st.session_state["current_session"] = "some-other-session"
+app.st.session_state["current_branch"] = "main"
+app.st.session_state["message"] = []
+app.load_selected_session(bsid)
+check("重新进入会话时读取的是存档里标注的当前分支",
+      app.st.session_state["current_branch"] == target, app.st.session_state["current_branch"])
+check("重新进入会话时载入该分支的消息",
+      app.st.session_state["message"] == msgs_of(bsid, target), app.st.session_state["message"])
+check("重新进入会话时标记消息所属分支",
+      app.st.session_state["_message_branch"] == target, app.st.session_state.get("_message_branch"))
+
+# 清理掉这个测试会话，避免影响后面按会话列表排序的断言
+app.delete_session(bsid)
+app.st.session_state["current_session"] = "2026-01-01_120000_000"
+check("分支测试会话已清理", not (tmp / bsid).exists())
+
 blank_title = tmp / "3000-01-01_000000_000.json"
 blank_title.write_text(json.dumps({"title": "  "}), encoding="utf-8")
 check("空 title 也回退成会话 ID", app.session_title("3000-01-01_000000_000") == "3000-01-01_000000_000",

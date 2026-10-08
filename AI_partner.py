@@ -514,6 +514,149 @@ def is_fresh_session() -> bool:
     return not session_file_exists()
 
 
+# --------------------------------------------------------------------------- #
+# 分支
+#
+# 一条分支 = 一条线性消息列表。所谓"分叉"不是真树，而是：两条分支共享同一个
+# 分叉点（parent 分支的第 fork_index 条之前的前缀），此后各写各的。
+# 编辑消息 / 重新生成都通过 fork_branch() 新建一条分支，原分支保留可切回。
+# --------------------------------------------------------------------------- #
+def next_branch_id(session_name: str) -> str:
+    """给新分支取一个不冲突的 ID：b2、b3……（main 永远是第一条）。"""
+    taken = set(branch_ids(session_name))
+    index = 2
+    while f"b{index}" in taken:
+        index += 1
+    return f"b{index}"
+
+
+def branch_siblings(session_name: str, branch_id: str) -> list:
+    """同一次分叉产生的兄弟分支（parent 与 fork_index 都相同的那些）。"""
+    items = normalize_branches(load_session_meta(session_name).get("branches"))
+    me = next((b for b in items if b["id"] == branch_id), None)
+    if me is None:
+        return [branch_id]
+    same = [b["id"] for b in items
+            if b.get("parent") == me.get("parent") and b.get("fork_index") == me.get("fork_index")]
+    return same or [branch_id]
+
+
+def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None) -> str:
+    """新建一条分支并把 prefix(+seed) 写进去，返回新分支 ID。
+
+    prefix 是新分支继承的消息前缀；seed 是分叉点那条被改写/重新生成的消息
+    （编辑消息时传入，重新生成时传 None）。
+    """
+    migrate_session(session_name)
+    branch_id = next_branch_id(session_name)
+    meta = load_session_meta(session_name)
+    meta["branches"] = normalize_branches(
+        [*normalize_branches(meta.get("branches")), _branch(branch_id, parent, fork_index)]
+    )
+    meta["current_branch"] = branch_id
+    messages = [dict(m) for m in prefix]
+    if seed is not None:
+        messages.append(dict(seed))
+    write_branch(session_name, branch_id, {"message": messages})
+    write_session_meta(session_name, meta)
+    return branch_id
+
+
+def switch_branch(session_name: str, branch_id: str) -> None:
+    """切换当前分支：先确保目标分支文件存在，最后才改 meta 里的指针。
+
+    顺序很重要：反过来可能出现"指针指向一条还不存在的分支"。
+    这是按钮回调，Streamlit 在回调之后本来就会重跑一次，所以这里不调用
+    st.rerun()：多调一次会让 st.rerun 之后的代码被整体跳过，而且快速重跑
+    在部分环境下（如 AppTest）不会被执行，反而看不清真实行为。
+    """
+    if branch_id not in branch_ids(session_name):
+        st.error(f"分支不存在：{branch_id}")
+        return
+    data = read_branch(session_name, branch_id)
+    write_branch(session_name, branch_id, data)  # 不存在时补一个空分支文件
+    meta = load_session_meta(session_name)
+    meta["current_branch"] = branch_id
+    write_session_meta(session_name, meta)
+    st.session_state.current_branch = branch_id
+
+
+def rename_branch(session_name: str, branch_id: str, new_id: str = None, input_key: str = None) -> None:
+    """分支改名：改名等于改 ID，因此分支文件要一起重命名（走回调）。"""
+    if new_id is None:
+        new_id = st.session_state.get(input_key, "")
+    new_id = (new_id or "").strip()
+    if not new_id or new_id == branch_id:
+        return
+    try:
+        branch_path(session_name, new_id)  # 借它做非法名校验
+    except ValueError as e:
+        st.error(str(e))
+        return
+    meta = load_session_meta(session_name)
+    items = normalize_branches(meta.get("branches"))
+    if any(b["id"] == new_id for b in items):
+        st.error(f"分支名已存在：{new_id}")
+        return
+    try:
+        old_path, new_path = branch_path(session_name, branch_id), branch_path(session_name, new_id)
+        if old_path.exists():
+            if new_path.exists():
+                st.error(f"分支文件已存在：{new_path.name}")
+                return
+            os.replace(old_path, new_path)
+        for item in items:
+            if item["id"] == branch_id:
+                item["id"] = new_id
+        meta["branches"] = items
+        if meta.get("current_branch") == branch_id:
+            meta["current_branch"] = new_id
+        write_session_meta(session_name, meta)
+        if st.session_state.get("current_branch") == branch_id and session_name == st.session_state.get("current_session"):
+            st.session_state.current_branch = new_id
+            st.session_state._message_branch = new_id
+    except Exception as e:  # noqa: BLE001
+        st.error(f"分支改名失败: {e}")
+
+
+def delete_branch(session_name: str, branch_id: str) -> None:
+    """删除一条分支；只剩一条时不允许删。
+
+    删掉的分支如果有子分支，把子分支的 parent 改挂到它的 parent 上
+    （fork_index 不变），这样分支树不会断。
+    """
+    try:
+        meta = load_session_meta(session_name)
+        items = normalize_branches(meta.get("branches"))
+        if len(items) <= 1:
+            st.error("至少要保留一条分支")
+            return
+        me = next((b for b in items if b["id"] == branch_id), None)
+        if me is None:
+            return
+        remaining = [b for b in items if b["id"] != branch_id]
+        for item in remaining:
+            if item.get("parent") == branch_id:
+                item["parent"] = me.get("parent")
+        current = meta.get("current_branch")
+        if current == branch_id:
+            # 优先跳回父分支，没有父就跳第一条
+            current = me.get("parent") if any(b["id"] == me.get("parent") for b in remaining) else remaining[0]["id"]
+        meta["branches"] = remaining
+        meta["current_branch"] = current
+        write_session_meta(session_name, meta)
+        path = branch_path(session_name, branch_id)
+        if path.exists():
+            path.unlink()
+        if session_name == st.session_state.get("current_session"):
+            previous = st.session_state.get("current_branch")
+            st.session_state.current_branch = current
+            if current != previous:
+                st.session_state.message = read_branch(session_name, current).get("message", [])
+    except Exception as e:  # noqa: BLE001
+        st.error(f"删除分支失败: {e}")
+
+
 def load_selected_session(session_name: str) -> None:
     try:
         has_archive = _session_exists(session_name)
@@ -542,6 +685,8 @@ def load_selected_session(session_name: str) -> None:
         st.session_state.session_title = (restore.get("title") or "").strip() or session_name
         st.session_state.session_pinned = bool(restore.get("pinned"))
         st.session_state.current_branch = meta.get("current_branch") or "main"
+        # 标记"内存里的消息属于哪条分支"，渲染时据此判断要不要从磁盘重载
+        st.session_state._message_branch = st.session_state.current_branch
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
@@ -988,6 +1133,56 @@ with st.sidebar:
                         on_click=lambda s=session: delete_session(s),
                     )
 
+    # 分支管理：一个会话可以有多条分支（编辑消息 / 重新生成都会新建分支）
+    sid = st.session_state.current_session
+    if session_file_exists(sid):
+        meta = load_session_meta(sid)
+        disk_branch = meta.get("current_branch") or "main"
+        st.session_state.current_branch = disk_branch
+        # 以磁盘为准：如果内存里的消息还是另一条分支的，就把当前分支的消息读回来。
+        # 这样"点击切换分支"只依赖回调写盘，不依赖回调改内存状态
+        # （AppTest 等场景下，控件回调结束后内存状态可能被回滚到点击之前）。
+        if st.session_state.get("_message_branch") != disk_branch:
+            st.session_state.message = read_branch(sid, disk_branch).get("message", [])
+            st.session_state._message_branch = disk_branch
+        current_branch = disk_branch
+        branch_list = branch_ids(sid)
+        st.subheader(f"分支（{len(branch_list)}）")
+        if len(branch_list) == 1:
+            st.caption("编辑消息或重新生成时会自动新建分支，旧分支会保留。")
+        for branch in branch_list:
+            active = branch == current_branch
+            bcol1, bcol2 = st.columns([4, 1])
+            with bcol1:
+                st.button(
+                    branch,
+                    key=f"branch_{sid}_{branch}",
+                    width="stretch",
+                    type="primary" if active else "secondary",
+                    help=f"分支 {branch}",
+                    on_click=switch_branch,
+                    args=(sid, branch),
+                )
+            with bcol2:
+                with st.popover("⋯", width="stretch", help="重命名或删除这条分支",
+                                key=f"branch_menu_{sid}_{branch}"):
+                    st.text_input(
+                        "重命名分支",
+                        value=branch,
+                        key=f"branch_rename_{sid}_{branch}",
+                        on_change=rename_branch,
+                        args=(sid, branch),
+                        kwargs={"new_id": None, "input_key": f"branch_rename_{sid}_{branch}"},
+                    )
+                    st.button(
+                        "删除分支",
+                        key=f"branch_delete_{sid}_{branch}",
+                        width="stretch",
+                        icon=":material/delete:",
+                        disabled=len(branch_list) <= 1,
+                        on_click=delete_branch,
+                        args=(sid, branch),
+                    )
 
     st.divider()
 

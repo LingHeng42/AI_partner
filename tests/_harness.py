@@ -110,6 +110,17 @@ def reset_tmp() -> None:
 # 干净起点 + 环境变量 + 路径
 reset_tmp()
 sys.dont_write_bytecode = True
+
+# 解释器退出时 tempfile 会去删自己登记过的临时目录；沙箱建的目录带
+# "Everyone 拒绝删除" ACL，删不掉就抛 PermissionError，把进程退出码弄成 1
+# （断言全过却"失败"）。这里直接卸掉这个清理钩子。
+try:
+    import tempfile as _tempfile
+
+    _tempfile._cleanup = lambda *a, **k: None
+except Exception:  # noqa: BLE001
+    pass
+
 os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
