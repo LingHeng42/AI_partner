@@ -749,7 +749,11 @@ check("回放时只对含推理的回答生成折叠面板", len(expanders.sinks
       [s.label for s in expanders.sinks])
 check("回放时思考面板默认折叠", expanders.sinks and expanders.sinks[0].states == [False],
       expanders.sinks[0].states if expanders.sinks else None)
-check("回放的面板各有独立 key", expanders.sinks and expanders.sinks[0].key == "history_reasoning_1",
+check("回放的面板各有独立 key（带分支名与序号）",
+      expanders.sinks and expanders.sinks[0].key == "history_reasoning_main_1",
+      expanders.sinks[0].key if expanders.sinks else None)
+check("回放面板 key 含分支名（切分支不会串位）",
+      expanders.sinks and "main" in (expanders.sinks[0].key or ""),
       expanders.sinks[0].key if expanders.sinks else None)
 
 # 带推理的历史会随请求回传给 API（官方示例的用法）
@@ -779,6 +783,54 @@ app.client = FakeClient(completions=FakeCompletions(empty=True))
 app.render_reply(_Sink())
 check("空回答给出 st.warning", warnings.calls and "没有返回" in warnings.calls[-1], warnings.calls[-1:])
 check("空回答不写入历史", app.st.session_state.message == [{"role": "user", "content": "空回答"}])
+
+# --------------------------------------------------------------------------- #
+# 重新生成：新建分支（旧回答保留），新分支里放新的回答
+# --------------------------------------------------------------------------- #
+regen_id = "2027-07-07_070707_000"
+fresh_state(current_session=regen_id, current_branch="main", session_title="重新生成测试")
+app.st.session_state["message"] = [{"role": "user", "content": "问题一"},
+                                   {"role": "assistant", "content": "旧回答"},
+                                   {"role": "user", "content": "问题二"},
+                                   {"role": "assistant", "content": "旧回答二"}]
+app.save_session()
+check("重新生成前只有一条分支", app.branch_ids(regen_id) == ["main"], app.branch_ids(regen_id))
+
+# 点击「重新生成」：回调只准备新分支与标记，不发请求
+calls_before = len(completions.calls)
+app.regenerate(3)
+regen_branch = app.st.session_state["current_branch"]
+check("重新生成新建了分支", regen_branch == "b2", regen_branch)
+check("新分支继承被重新生成那条之前的前缀",
+      msgs_of(regen_id, "b2") == [{"role": "user", "content": "问题一"},
+                                  {"role": "assistant", "content": "旧回答"},
+                                  {"role": "user", "content": "问题二"}],
+      msgs_of(regen_id, "b2"))
+check("旧分支原样保留", msgs_of(regen_id, "main")[3]["content"] == "旧回答二")
+check("新分支记下分叉点", [(b["parent"], b["fork_index"]) for b in app.load_session_meta(regen_id)["branches"]
+                          if b["id"] == "b2"] == [("main", 3)])
+check("标记了待生成", app.st.session_state["pending_regen"] is True)
+check("回调阶段没有发起请求（请求交给页面主体）", len(completions.calls) == calls_before,
+      len(completions.calls) - calls_before)
+
+# 页面主体处理标记：真正生成并写入新分支
+regen_completions = FakeCompletions(chunks=["新回答"])
+app.client = FakeClient(completions=regen_completions)
+app.render_pending_regen()
+check("生成后清除标记", app.st.session_state["pending_regen"] is False)
+check("新回答追加进新分支",
+      [m["content"] for m in msgs_of(regen_id, "b2")] == ["问题一", "旧回答", "问题二", "新回答"],
+      msgs_of(regen_id, "b2"))
+check("旧分支仍然没被动", [m["content"] for m in msgs_of(regen_id, "main")] ==
+      ["问题一", "旧回答", "问题二", "旧回答二"], msgs_of(regen_id, "main"))
+check("重新进入会话会回到重新生成后的分支",
+      json.loads(meta_of(regen_id).read_text(encoding="utf-8"))["current_branch"] == "b2")
+check("请求带上被重新生成那条之前的历史",
+      [m["content"] for m in regen_completions.calls[0]["messages"][1:]] ==
+      ["问题一", "旧回答", "问题二"], regen_completions.calls[0]["messages"])
+check("再次重新生成会再建一条分支",
+      (lambda: (app.regenerate(3), app.st.session_state["current_branch"] == "b3")[1])())
+app.delete_session(regen_id)
 
 # --------------------------------------------------------------------------- #
 # 高级配置：请求参数是否按配置拼装

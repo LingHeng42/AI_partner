@@ -782,10 +782,15 @@ def trim_context(messages: list) -> list:
     return list(reversed(kept))
 
 
-def build_messages() -> list:
+def build_messages(messages: list = None) -> list:
+    """拼装请求消息：system prompt + 截断后的历史。
+
+    messages 省略时用当前会话的消息；重新生成时传入新分支的消息列表。
+    """
     system_content = SYSTEM_PROMPT.format(**profile_from_state())
+    source = st.session_state.message if messages is None else messages
     history = []
-    for msg in trim_context(st.session_state.message):
+    for msg in trim_context(source):
         # 官方示例会把 reasoning_content 一起回传，API 会忽略它、也不计入上下文
         if msg.get("role") == "assistant" and msg.get("reasoning_content"):
             history.append({
@@ -818,11 +823,11 @@ def apply_advanced(data: dict) -> None:
         st.session_state[key] = default if value is None else value
 
 
-def build_request_payload() -> dict:
+def build_request_payload(messages: list = None) -> dict:
     """按侧边栏的高级配置拼装请求参数，未启用的项不发送。"""
     payload = {
         "model": MODEL_NAME,
-        "messages": build_messages(),
+        "messages": build_messages(messages),
         "stream": True,
         "temperature": advanced_value("temperature"),
         "top_p": advanced_value("top_p"),
@@ -882,18 +887,22 @@ def reasoning_expander(key: str, state_key: str, expanded: bool):
     )
 
 
-def render_reply(placeholder) -> None:
-    """请求模型，把流式推理渲染进折叠面板、正文用 st.write_stream 渲染。
+def generate_reply(placeholder, messages: list) -> tuple:
+    """请求模型并把流式结果渲染进 placeholder，返回 (正文, 推理内容)。
 
     正文交给 st.write_stream（官方推荐的流式渲染方式）；推理片段在同一趟迭代里
     顺带写进「思考过程」折叠面板，所以两种内容仍然是边收边显示。
     异常在这里被消化成 st.error，调用方（页面脚本）不再需要 try/except。
+
+    注意：**不把回答写进 st.session_state.message**，也不落盘——那由调用方决定，
+    因为重新生成与编辑消息需要先把新分支准备好、再决定怎么写入。
     """
     reasoning = ""
-    full_response = ""  # 异常路径下也要有定义，后面才能安全判断
+    full_response = ""  # 异常路径下也要有定义
     thinking_enabled = bool(st.session_state.thinking)
+    reasoning_text = None
     try:
-        response = client.chat.completions.create(**build_request_payload())
+        response = client.chat.completions.create(**build_request_payload(messages))
 
         def stream_body():
             """边消费模型流边渲染：先出推理，再流式吐正文。"""
@@ -921,10 +930,8 @@ def render_reply(placeholder) -> None:
                     yield content_piece
 
         with placeholder.chat_message("assistant"):
-            reasoning_placeholder, reasoning_text = None, None
             if thinking_enabled:
-                reasoning_placeholder = reasoning_expander("reasoning_panel", "show_reasoning", True)
-                with reasoning_placeholder:
+                with reasoning_expander("reasoning_panel", "show_reasoning", True):
                     reasoning_text = st.empty()
                     # 官方推荐的进行中提示：微光文字本身就是状态指示
                     reasoning_text.markdown(":shimmer[思考中…]")
@@ -935,14 +942,24 @@ def render_reply(placeholder) -> None:
         placeholder.empty()
         st.error(f"请求模型失败：{e}")
         st.caption("本条消息已保留在对话中，可直接重试或继续输入。")
+    return full_response, reasoning
 
-    if full_response:
-        reply = {"role": "assistant", "content": full_response}
-        if reasoning:
-            reply["reasoning_content"] = reasoning
-        st.session_state.message.append(reply)
-    else:
+
+def remember_reply(full_response: str, reasoning: str) -> None:
+    """把一次生成的回答追加进当前消息列表（内存）。"""
+    if not full_response:
         st.warning("模型没有返回任何内容，本次回答未记录。")
+        return
+    reply = {"role": "assistant", "content": full_response}
+    if reasoning:
+        reply["reasoning_content"] = reasoning
+    st.session_state.message.append(reply)
+
+
+def render_reply(placeholder) -> None:
+    """用户发消息后的回答：生成 → 追加到当前分支 → 落盘。"""
+    full_response, reasoning = generate_reply(placeholder, st.session_state.message)
+    remember_reply(full_response, reasoning)
 
     existed = session_file_exists()
     save_session()
@@ -953,12 +970,50 @@ def render_reply(placeholder) -> None:
         st.rerun()
 
 
+def regenerate(index: int) -> None:
+    """重新生成第 index 条（assistant）回复：新建分支，不覆盖原分支。
+
+    作为按钮回调执行：只准备新分支与待生成标记，真正的请求交给页面主体
+    （回调阶段不适合发起流式请求）。
+    """
+    sid = st.session_state.get("current_session")
+    messages = st.session_state.get("message", [])
+    if not sid or not (0 <= index < len(messages)):
+        return
+    prefix = [dict(m) for m in messages[:index]]
+    branch_id = fork_branch(sid, prefix, seed=None,
+                            parent=st.session_state.get("current_branch") or "main",
+                            fork_index=index)
+    st.session_state.current_branch = branch_id
+    st.session_state.message = [dict(m) for m in prefix]
+    st.session_state._message_branch = branch_id
+    st.session_state.pending_regen = True
+
+
+def render_pending_regen() -> None:
+    """页面主体：处理"重新生成"标记（回调阶段不发起流式请求）。"""
+    if not st.session_state.get("pending_regen"):
+        return
+    st.session_state.pending_regen = False
+    full_response, reasoning = generate_reply(st.empty(), st.session_state.message)
+    remember_reply(full_response, reasoning)
+    save_session()
+
+
 def render_history() -> None:
-    """按存储顺序回放历史：带推理的回答把思考过程放进折叠面板。"""
+    """按存储顺序回放历史：带推理的回答把思考过程放进折叠面板。
+
+    每条助手回答下方给一行小操作（重新生成；第 4 层再加编辑与分支切换）。
+    控件 key 里必须带**分支名 + 消息序号**：只用序号的话，切换分支后会串到
+    另一条分支的同序号消息上（与"删会话后弹层串位"是同一类问题）。
+    """
+    branch = st.session_state.get("current_branch") or "main"
+    last = len(st.session_state.message) - 1
     for index, msg in enumerate(st.session_state.message):
         with st.chat_message(msg["role"]):
             if msg.get("reasoning_content"):
-                with reasoning_expander(f"history_reasoning_{index}", f"history_reasoning_open_{index}", False):
+                with reasoning_expander(f"history_reasoning_{branch}_{index}",
+                                        f"history_reasoning_open_{branch}_{index}", False):
                     # 引用块，原生md，不存在html懒渲染问题
                     st.markdown(
                         format_reasoning_html(msg["reasoning_content"]),
@@ -967,6 +1022,19 @@ def render_history() -> None:
 
             if msg.get("content"):
                 st.markdown(msg["content"])
+
+            # 只有当前分支的最后一条回答能"重新生成"（更早的回答请用编辑）
+            if msg.get("role") == "assistant" and index == last:
+                with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
+                                help="重新生成本条回答"):
+                    st.button(
+                        "重新生成",
+                        key=f"regen_{branch}_{index}",
+                        width="stretch",
+                        icon=":material/refresh:",
+                        on_click=regenerate,
+                        args=(index,),
+                    )
 
 def format_reasoning_html(text: str, streaming: bool = False) -> str:
     """把推理内容包装成紧凑样式的 HTML，流式时带光标。"""
@@ -1007,6 +1075,10 @@ st.session_state.setdefault("thinking", False)
 st.session_state.setdefault("session_title", DEFAULT_SESSION_TITLE)
 # 当前所在分支（一条分支 = 一条线性消息列表；切换分支就是整体换掉 message）
 st.session_state.setdefault("current_branch", "main")
+# 内存里的 message 属于哪条分支（渲染时据此判断要不要从磁盘重载）
+st.session_state.setdefault("_message_branch", st.session_state.current_branch)
+# 「重新生成」标记：按钮回调里只做标记，流式请求交给页面主体
+st.session_state.setdefault("pending_regen", False)
 if "current_session" not in st.session_state:
     st.session_state.current_session = new_session_id()
 
@@ -1023,6 +1095,9 @@ client = get_client(require_api_key())
 # 展示历史对话（开启过深度思考的回答会带上可折叠的思考过程）
 st.header(st.session_state.session_title)
 render_history()
+
+# 上一轮点了「重新生成」：在这里真正发起流式请求（回调阶段不适合做流式渲染）
+render_pending_regen()
 
 # --------------------------------------------------------------------------- #
 # 侧边栏
