@@ -71,10 +71,19 @@ class _Cache:
 
 
 class _State:
-    """同时支持 st.session_state.key 与 st.session_state["key"] 的极简替代品。"""
+    """同时支持 st.session_state.key 与 st.session_state["key"] 的极简替代品。
+
+    还模拟了 Streamlit 的一条重要规则：**控件自己的 key 是只读的**。
+    给这类 key 赋值会抛 StreamlitValueAssignmentNotAllowedError
+    （点"新建会话"就崩过一次：reset_avatar 曾去清 file_uploader 的 key）。
+    """
 
     def __init__(self, data=None):
         object.__setattr__(self, "_data", dict(data or {}))
+
+    @staticmethod
+    def _is_widget_key(key):
+        return key.startswith(("_uploader_", "chat_input", "clear_avatar_"))
 
     def __getattr__(self, item):
         try:
@@ -83,12 +92,26 @@ class _State:
             raise AttributeError(item) from exc
 
     def __setattr__(self, key, value):
+        if self._is_widget_key(key):
+            raise RuntimeError(
+                f"StreamlitValueAssignmentNotAllowedError: st.session_state['{key}'] "
+                "is read-only and cannot be assigned through session state."
+            )
         self._data[key] = value
 
     def __getitem__(self, key):
         return self._data[key]
 
     def __setitem__(self, key, value):
+        if self._is_widget_key(key):
+            raise RuntimeError(
+                f"StreamlitValueAssignmentNotAllowedError: st.session_state['{key}'] "
+                "is read-only and cannot be assigned through session state."
+            )
+        self._data[key] = value
+
+    def set_widget_value(self, key, value):
+        """测试内部用：模拟"控件里已经有这个值"（只读约束不适用于控件自身）。"""
         self._data[key] = value
 
     def __contains__(self, key):
@@ -982,7 +1005,7 @@ check("默认没有自定义头像", app.current_avatar("user", avatar_id) is No
 check("默认没有自定义 AI 头像", app.current_avatar("assistant", avatar_id) is None)
 
 # 上传用户头像（走真实回调路径）
-app.st.session_state["_uploader_user_avatar"] = _FakeUpload(PNG_BYTES)
+app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(PNG_BYTES))
 app.set_avatar("user_avatar")
 saved_rel = app.st.session_state["user_avatar"]
 check("上传后记录了相对路径", saved_rel and saved_rel.startswith("attachments/"), saved_rel)
@@ -994,7 +1017,7 @@ check("current_avatar 返回绝对路径", str(app.current_avatar("user", avatar
 check("用户头像不影响 AI 头像", app.current_avatar("assistant", avatar_id) is None)
 
 # 上传 AI 头像
-app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(real_png((0, 255, 0)))
+app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(real_png((0, 255, 0))))
 app.set_avatar("assistant_avatar")
 check("AI 头像也设置成功", app.current_avatar("assistant", avatar_id) is not None)
 check("两个头像互不干扰", app.current_avatar("user", avatar_id) != app.current_avatar("assistant", avatar_id))
@@ -1019,18 +1042,18 @@ check("头像路径不出现在请求里", "attachments/" not in serialized)
 
 # 同一张图重复上传：内容哈希命名 → 复用同一个文件，不重复占空间
 files_before = sorted(p.name for p in app.attachments_dir(avatar_id).glob("*"))
-app.st.session_state["_uploader_user_avatar"] = _FakeUpload(PNG_BYTES)
+app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(PNG_BYTES))
 app.set_avatar("user_avatar")
 check("同内容图片不重复落盘",
       sorted(p.name for p in app.attachments_dir(avatar_id).glob("*")) == files_before)
 
 # 超大图与非法格式被拒绝（且不会改动已有设置）
-app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(b"x" * (app.MAX_AVATAR_BYTES + 1))
+app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(b"x" * (app.MAX_AVATAR_BYTES + 1)))
 app.set_avatar("assistant_avatar")
 check("超过大小限制的头像被拒绝",
       (json.loads(meta_of(avatar_id).read_text(encoding="utf-8")).get("assistant_avatar") or "").endswith(".png"))
 errors.calls.clear()
-app.st.session_state["_uploader_assistant_avatar"] = _FakeUpload(b"totally not an image")
+app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(b"totally not an image"))
 app.set_avatar("assistant_avatar")
 check("非法格式的头像被拒绝并提示", errors.calls and "格式" in errors.calls[-1], errors.calls[-1:])
 
@@ -1055,7 +1078,7 @@ app.new_session()  # 点「新建会话」
 second_id = app.st.session_state["current_session"]
 check("新建会话后头像回到默认", app.st.session_state["user_avatar"] is None)
 # 新会话还没产生对话（只有草稿），此时设置头像不能丢
-app.st.session_state["_uploader_user_avatar"] = _FakeUpload(real_png((0, 0, 255)))
+app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(real_png((0, 0, 255))))
 app.set_avatar("user_avatar")
 second_rel = app.st.session_state["user_avatar"]
 check("新会话（只有草稿）设置头像后立刻生效", app.current_avatar("user") is not None, second_rel)
@@ -1068,6 +1091,41 @@ app.load_selected_session(second_id)
 check("切到第二个会话是它自己的头像", app.st.session_state["user_avatar"] == second_rel,
       app.st.session_state["user_avatar"])
 check("同一个用户在不同会话可以是不同头像", saved_rel != second_rel)
+
+# 新建/删除会话会重置头像：**不能**去清 file_uploader 的控件 key
+# （Streamlit 把控件 key 视为只读，赋值会抛 StreamlitValueAssignmentNotAllowedError，
+#  这正是"点新建会话就崩"的原因；上面的 _State 会模拟这个约束）
+app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(PNG_BYTES))
+app.st.session_state["user_avatar"] = saved_rel
+try:
+    app.reset_avatar()
+    check("reset_avatar 不会去写控件 key（不再抛只读异常）", True)
+except RuntimeError as e:
+    check("reset_avatar 不会去写控件 key（不再抛只读异常）", False, str(e))
+check("reset_avatar 清空头像设置", app.st.session_state.get("user_avatar") is None)
+try:
+    app.clear_avatar("user_avatar")
+    check("clear_avatar 不会去写控件 key", True)
+except RuntimeError as e:
+    check("clear_avatar 不会去写控件 key", False, str(e))
+# 切换会话后，上传控件里残留的旧文件不能套用到新会话上
+app.st.session_state["user_avatar"] = None
+app.st.session_state["_avatar_applied"] = None
+app.st.session_state["_avatar_uploaded_for"] = "别的会话"
+app.set_avatar("user_avatar")
+check("别的会话留下的上传不会被套用到当前会话",
+      app.st.session_state.get("user_avatar") is None, app.st.session_state.get("user_avatar"))
+app.st.session_state["_avatar_uploaded_for"] = app.st.session_state["current_session"]
+app.set_avatar("user_avatar")
+check("当前会话自己的上传照常生效",
+      (app.st.session_state.get("user_avatar") or "").startswith("attachments/"),
+      app.st.session_state.get("user_avatar"))
+# 同一张图在重跑时不会重复处理
+app.st.session_state["user_avatar"] = None
+app.set_avatar("user_avatar")  # _avatar_applied 已记下这个文件
+check("同一张图不会被重复处理", app.st.session_state.get("user_avatar") is None,
+      app.st.session_state.get("user_avatar"))
+app.st.session_state["user_avatar"] = saved_rel  # 还原
 
 # 坏图片/解不开的内容：不能让整个页面崩（st.chat_message 会真去解码图片）
 broken_dir = tmp / avatar_id / "attachments"

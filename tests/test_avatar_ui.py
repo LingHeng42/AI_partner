@@ -159,6 +159,21 @@ check("AI 头像路径指向会话的 attachments",
       str(at.session_state["assistant_avatar"]).startswith("attachments/"), at.session_state["assistant_avatar"])
 check("两个角色用的是不同图片", at.session_state["user_avatar"] != at.session_state["assistant_avatar"])
 
+# --------------------------------------------------------------------------- #
+# 点「新建会话」会重置头像：不能去清 file_uploader 的控件 key
+#   （Streamlit 把控件 key 视为只读，赋值会抛
+#    StreamlitValueAssignmentNotAllowedError —— 这是真实发生过的崩溃，
+#    所以这里用真实页面再验一遍）
+# --------------------------------------------------------------------------- #
+new_button = next((b for b in at.button if b.label == "新建会话"), None)
+check("找到新建会话按钮", new_button is not None)
+if new_button is not None:
+    at2 = new_button.click().run()
+    check("点新建会话不抛异常", not at2.exception, [e.message for e in at2.exception])
+    # 注：这里只断言"没有崩"。AppTest 在控件回调结束后会把 session_state 回滚到
+    # 点击前的快照（连 current_session 都会回到旧值），所以"新建会话后头像被清空"
+    # 无法在这一层观察；它由 tests/test_logic.py 里对 reset_avatar 的直接断言覆盖。
+
 # 清理隔离目录（真实 sessions/ 不会被触碰）
 for _f in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
     _f.unlink()

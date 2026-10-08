@@ -212,14 +212,24 @@ def set_avatar(key: str) -> None:
     作为 st.file_uploader 的 on_change 回调执行（回调先于控件实例化），
     所以这里改 *_avatar 这类普通状态键是安全的。上传的文件从控件自己的
     session_state 里读（不通过 args 传：args 是渲染时求值的，那时还没选文件）。
+
+    两道防串会话的保护：
+    - `_avatar_uploaded_for` 记下这次上传属于哪个会话，只在当前会话仍是它时才应用
+    - `_avatar_applied` 记下已经处理过的文件，重跑时不会把同一张图重复写一次
     """
     uploaded = st.session_state.get(f"_uploader_{key}")
     if uploaded is None:
         return
-    data = uploaded.getvalue()
     session_name = st.session_state.get("current_session")
     if not session_name:
         return
+    # 切换会话后，上传控件里可能还留着上一个会话选的文件：不能套用到新会话上
+    owner = st.session_state.get("_avatar_uploaded_for")
+    if owner is not None and owner != session_name:
+        return
+    if st.session_state.get("_avatar_applied") is uploaded:
+        return  # 同一张图已经处理过（重跑时控件仍持有它）
+    data = uploaded.getvalue()
     if len(data) > MAX_AVATAR_BYTES:
         st.error(f"图片太大（{len(data) / 1024 / 1024:.1f} MB），请压缩到 5 MB 以内")
         return
@@ -232,14 +242,19 @@ def set_avatar(key: str) -> None:
     except Exception as e:  # noqa: BLE001
         st.error(f"保存头像失败: {e}")
         return
+    st.session_state._avatar_uploaded_for = session_name
+    st.session_state._avatar_applied = uploaded
     save_session()  # 立刻落盘（有对话进 meta.json，没对话进草稿）
 
 
 def clear_avatar(key: str) -> None:
-    """清除头像（只清设置，图片文件留在附件目录里不删，避免误删别的引用）。"""
+    """清除头像（只清设置，图片文件留在附件目录里不删，避免误删别的引用）。
+
+    不能给 file_uploader 的控件 key 赋值（Streamlit 视为只读），所以改用
+    `_avatar_applied` 记住"这个文件已处理过"，避免它被重复写回来。
+    """
     st.session_state[key] = None
-    # 上传控件带着上次的文件，必须清掉它的状态，否则下一次重跑又会把旧图写回来
-    st.session_state[f"_uploader_{key}"] = None
+    st.session_state._avatar_applied = st.session_state.get(f"_uploader_{key}")
     save_session()
 
 
@@ -514,10 +529,18 @@ def reset_profile() -> None:
 
 
 def reset_avatar() -> None:
-    """把对话头像恢复成默认（新建/删除会话时用；图片文件留在附件目录里不删）。"""
+    """把对话头像恢复成默认（新建/删除会话时用；图片文件留在附件目录里不删）。
+
+    注意：**不能**给 `_uploader_*` 这类 file_uploader 的控件 key 赋值——
+    Streamlit 把控件 key 视为只读，赋值会抛
+    StreamlitValueAssignmentNotAllowedError（点"新建会话"就崩在这里）。
+    上传控件里残留的文件靠 `_avatar_uploaded_for` / `_avatar_applied` 两个
+    标记忽略掉：前者让"别的会话选的文件"不生效，后者让同一张图不重复处理。
+    """
     for key in AVATAR_KEYS:
         st.session_state[key] = None
-        st.session_state[f"_uploader_{key}"] = None
+    st.session_state._avatar_uploaded_for = None
+    st.session_state._avatar_applied = None
 
 
 def draft_path(session_name: str = None):
@@ -1340,7 +1363,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        "Report a bug": "https://github.com/LingHeng42",
+        "Report a bug": "https://github.com/LingHeng42/AI_partner/issues",
         "About": "凌恒的酒馆是一个基于人工智能的聊天平台，旨在为用户提供一个有趣、互动和智能的聊天体验。",
     },
 )
@@ -1507,84 +1530,84 @@ with st.sidebar:
             st.session_state._message_branch = disk_branch
         current_branch = disk_branch
         branch_list = branch_ids(sid)
-        st.subheader(f"分支（{len(branch_list)}）")
-        if len(branch_list) == 1:
-            st.caption("编辑消息或重新生成时会自动新建分支，旧分支会保留。")
-        for branch in branch_list:
-            active = branch == current_branch
-            bcol1, bcol2 = st.columns([4, 1])
-            with bcol1:
-                st.button(
-                    branch,
-                    key=f"branch_{sid}_{branch}",
-                    width="stretch",
-                    type="primary" if active else "secondary",
-                    help=f"分支 {branch}",
-                    on_click=switch_branch,
-                    args=(sid, branch),
-                )
-            with bcol2:
-                with st.popover("⋯", width="stretch", help="重命名或删除这条分支",
-                                key=f"branch_menu_{sid}_{branch}"):
-                    st.text_input(
-                        "重命名分支",
-                        value=branch,
-                        key=f"branch_rename_{sid}_{branch}",
-                        on_change=rename_branch,
-                        args=(sid, branch),
-                        kwargs={"new_id": None, "input_key": f"branch_rename_{sid}_{branch}"},
-                    )
+        with st.expander(f"分支（{len(branch_list)}）", expanded=False, key="branch_expander"):
+            if len(branch_list) == 1:
+                st.caption("编辑消息或重新生成时会自动新建分支，旧分支会保留。")
+            for branch in branch_list:
+                active = branch == current_branch
+                bcol1, bcol2 = st.columns([4, 1])
+                with bcol1:
                     st.button(
-                        "删除分支",
-                        key=f"branch_delete_{sid}_{branch}",
+                        branch,
+                        key=f"branch_{sid}_{branch}",
                         width="stretch",
-                        icon=":material/delete:",
-                        disabled=len(branch_list) <= 1,
-                        on_click=delete_branch,
+                        type="primary" if active else "secondary",
+                        help=f"分支 {branch}",
+                        on_click=switch_branch,
                         args=(sid, branch),
                     )
+                with bcol2:
+                    with st.popover("⋯", width="stretch", help="重命名或删除这条分支",
+                                    key=f"branch_menu_{sid}_{branch}"):
+                        st.text_input(
+                            "重命名分支",
+                            value=branch,
+                            key=f"branch_rename_{sid}_{branch}",
+                            on_change=rename_branch,
+                            args=(sid, branch),
+                            kwargs={"new_id": None, "input_key": f"branch_rename_{sid}_{branch}"},
+                        )
+                        st.button(
+                            "删除分支",
+                            key=f"branch_delete_{sid}_{branch}",
+                            width="stretch",
+                            icon=":material/delete:",
+                            disabled=len(branch_list) <= 1,
+                            on_click=delete_branch,
+                            args=(sid, branch),
+                        )
 
-    st.divider()
 
-    # 对话头像：每个会话独立设置，只影响聊天气泡左侧的显示，**不会发给模型**
-    st.subheader("对话头像")
-    for _key in AVATAR_KEYS:
-        _current = avatar_file(st.session_state.current_session, _key)
-        if _current is not None:
-            _preview_col, _text_col = st.columns([1, 3], vertical_alignment="center")
-            with _preview_col:
-                st.image(str(_current), width=48)
-            with _text_col:
-                st.caption(f"已设置{AVATAR_LABELS[_key]}")
-        st.file_uploader(
-            AVATAR_LABELS[_key],
-            type=["png", "jpg", "jpeg", "gif", "webp"],
-            key=f"_uploader_{_key}",
-            on_change=set_avatar,
-            args=(_key,),
-            help="只改变这个会话里的显示，图片保存在该会话的存档目录里。",
-        )
-        if _current is not None:
-            st.button(
-                f"清除{AVATAR_LABELS[_key]}",
-                key=f"clear_avatar_{_key}",
-                width="stretch",
-                icon=":material/hide_image:",
-                on_click=clear_avatar,
-                args=(_key,),
-            )
-
-    st.divider()
 
     # 角色管理：控件 key 直接就是状态键；on_change 里立刻落盘，
     # 不需要手动回写（回写会在控件实例化后改同名 session_state 而报错）
     st.subheader("管理角色")
-    st.text_input("昵称", key="nickname", placeholder="请输入昵称", on_change=save_session)
-    st.text_area("性格", key="nature", placeholder="请输入性格描述", on_change=save_session)
-    st.text_area("角色简介", key="role_description", placeholder="请输入角色简介", on_change=save_session)
-    st.text_area("输出规则", key="output_rules", placeholder="请输入输出规则", on_change=save_session)
+    with st.expander("头像设置", expanded=False, key="avatar_panel"):
 
-    st.divider()
+        # 对话头像：每个会话独立设置，只影响聊天气泡左侧的显示，**不会发给模型**
+        st.subheader("对话头像")
+        for _key in AVATAR_KEYS:
+            _current = avatar_file(st.session_state.current_session, _key)
+            if _current is not None:
+                _preview_col, _text_col = st.columns([1, 3], vertical_alignment="center")
+                with _preview_col:
+                    st.image(str(_current), width=48)
+                with _text_col:
+                    st.caption(f"已设置{AVATAR_LABELS[_key]}")
+            st.file_uploader(
+                AVATAR_LABELS[_key],
+                type=["png", "jpg", "jpeg", "gif", "webp"],
+                key=f"_uploader_{_key}",
+                on_change=set_avatar,
+                args=(_key,),
+                help="只改变这个会话里的显示，图片保存在该会话的存档目录里。",
+            )
+            if _current is not None:
+                st.button(
+                    f"清除{AVATAR_LABELS[_key]}",
+                    key=f"clear_avatar_{_key}",
+                    width="stretch",
+                    icon=":material/hide_image:",
+                    on_click=clear_avatar,
+                    args=(_key,),
+                )
+
+    with st.expander("角色设定", expanded=False, key="chara_panel"):
+        st.text_input("昵称", key="nickname", placeholder="请输入昵称", on_change=save_session)
+        st.text_area("性格", key="nature", placeholder="请输入性格描述", on_change=save_session)
+        st.text_area("角色简介", key="role_description", placeholder="请输入角色简介", on_change=save_session)
+        st.text_area("输出规则", key="output_rules", placeholder="请输入输出规则", on_change=save_session)
+
 
     # 生成参数
     st.subheader("生成参数")

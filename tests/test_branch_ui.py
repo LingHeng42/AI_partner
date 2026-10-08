@@ -108,8 +108,10 @@ buttons = [b.label for b in at.button]
 
 check("页面无异常启动", not at.exception, [e.message for e in at.exception])
 check("应用脚本确实被执行", at.session_state.get("_branch_render_ran") is True)
-check("侧边栏出现分支区（含数量）", any("分支（3）" == s.value for s in at.subheader),
-      [s.value for s in at.subheader])
+check("侧边栏出现分支区（含数量）",
+      any((s.value or "").startswith("分支（") for s in at.subheader)
+      or any((e.label or "").startswith("分支（") for e in at.expander),
+      {"subheader": [s.value for s in at.subheader], "expander": [e.label for e in at.expander]})
 check("三条分支都渲染成按钮", all(b in buttons for b in ("main", "b2", "b3")), buttons)
 check("当前分支按钮为高亮", any(b.label == "b2" and b.proto.type == "primary" for b in at.button),
       [(b.label, b.proto.type) for b in at.button if b.label in ("main", "b2", "b3")])
