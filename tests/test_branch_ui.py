@@ -125,6 +125,18 @@ check("分支控件 key 带会话 ID 与分支名",
       and 'key=f"branch_rename_{sid}_{branch}"' in branch_section, "key 里缺少 sid/branch")
 
 # --------------------------------------------------------------------------- #
+# 每条消息都有操作入口（编辑这条；最后一条回答额外有重新生成）
+# --------------------------------------------------------------------------- #
+msg_menus = [k for k in ("main", "b2") if True]
+check("消息操作菜单渲染出来（气泡里的 ⋯）", any(b.label == "编辑这条" for b in at.button), buttons)
+check("最后一条回答有「重新生成」", any(b.label == "重新生成" for b in at.button), buttons)
+check("编辑入口每轮消息都有",
+      sum(1 for b in at.button if b.label == "编辑这条") == len(at.session_state["message"]),
+      [b.label for b in at.button])
+check("没有在编辑态时不渲染编辑框", "编辑这条消息" not in [t.label for t in at.text_area],
+      [t.label for t in at.text_area])
+
+# --------------------------------------------------------------------------- #
 # 关于"点击切换分支"为什么不在本文件里点：
 #   AppTest 会在控件回调结束后把 session_state 回滚到点击之前的快照，且不执行
 #   回调里的 st.rerun()（快速重跑），因此点击后拿到的元素树并不代表真实页面。

@@ -990,6 +990,46 @@ def regenerate(index: int) -> None:
     st.session_state.pending_regen = True
 
 
+def start_edit(index: int) -> None:
+    """进入某条消息的编辑态（在聊天气泡里就地编辑）。"""
+    st.session_state.editing_index = index
+
+
+def cancel_edit() -> None:
+    st.session_state.editing_index = None
+
+
+def submit_edit(index: int, input_key: str) -> None:
+    """保存编辑：新建分支（保留原分支），分叉点是"被编辑的这条"。
+
+    与"重新生成"的区别只在于分叉点上放什么：
+    - 编辑用户消息 → 新分支里放改写后的用户消息，然后生成新的回答
+    - 编辑 AI 回复  → 新分支里放改写后的 AI 回复，不再额外生成
+    这是按钮回调，Streamlit 在回调之后本来就会重跑一次，所以不调用 st.rerun()。
+    """
+    sid = st.session_state.get("current_session")
+    messages = st.session_state.get("message", [])
+    if not sid or not (0 <= index < len(messages)):
+        return
+    new_text = (st.session_state.get(input_key) or "").strip()
+    if not new_text:
+        st.error("消息内容不能为空")
+        return
+    prefix = [dict(m) for m in messages[:index]]
+    seed = dict(messages[index])
+    seed["content"] = new_text
+    seed.pop("reasoning_content", None)  # 改写过就不再保留旧的推理过程
+    branch_id = fork_branch(sid, prefix, seed=seed,
+                            parent=st.session_state.get("current_branch") or "main",
+                            fork_index=index)
+    st.session_state.current_branch = branch_id
+    st.session_state.message = [*[dict(m) for m in prefix], dict(seed)]
+    st.session_state._message_branch = branch_id
+    st.session_state.editing_index = None
+    # 改的是用户消息 → 需要模型接着回答；改的是 AI 回复 → 他自己写了内容，不再生成
+    st.session_state.pending_regen = seed.get("role") == "user"
+
+
 def render_pending_regen() -> None:
     """页面主体：处理"重新生成"标记（回调阶段不发起流式请求）。"""
     if not st.session_state.get("pending_regen"):
@@ -997,17 +1037,21 @@ def render_pending_regen() -> None:
     st.session_state.pending_regen = False
     full_response, reasoning = generate_reply(st.empty(), st.session_state.message)
     remember_reply(full_response, reasoning)
-    save_session()
+    # 生成成功才落盘：失败时保留"前缀+分叉点内容"这个状态，用户可以直接重试
+    if full_response:
+        save_session()
 
 
 def render_history() -> None:
-    """按存储顺序回放历史：带推理的回答把思考过程放进折叠面板。
+    """按存储顺序回放历史，并给出每条消息的操作入口。
 
-    每条助手回答下方给一行小操作（重新生成；第 4 层再加编辑与分支切换）。
+    - 每条消息（用户与 AI）都能「编辑」，保存后**新建分支**并从该位置重新生成
+    - 当前分支的最后一条助手回答额外提供「重新生成」与分支切换箭头
     控件 key 里必须带**分支名 + 消息序号**：只用序号的话，切换分支后会串到
     另一条分支的同序号消息上（与"删会话后弹层串位"是同一类问题）。
     """
     branch = st.session_state.get("current_branch") or "main"
+    siblings = branch_siblings(st.session_state.current_session, branch) if session_file_exists() else [branch]
     last = len(st.session_state.message) - 1
     for index, msg in enumerate(st.session_state.message):
         with st.chat_message(msg["role"]):
@@ -1020,21 +1064,75 @@ def render_history() -> None:
                         unsafe_allow_html=True,
                     )
 
-            if msg.get("content"):
-                st.markdown(msg["content"])
-
-            # 只有当前分支的最后一条回答能"重新生成"（更早的回答请用编辑）
-            if msg.get("role") == "assistant" and index == last:
-                with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
-                                help="重新生成本条回答"):
+            if st.session_state.get("editing_index") == index:
+                draft = st.text_area(
+                    "编辑这条消息",
+                    value=msg.get("content", ""),
+                    key=f"edit_box_{branch}_{index}",
+                    height=140,
+                    help="保存后会新建一条分支，并从这条消息之后重新生成；原分支会保留。",
+                )
+                save_col, cancel_col = st.columns(2)
+                with save_col:
                     st.button(
-                        "重新生成",
-                        key=f"regen_{branch}_{index}",
+                        "保存并重新生成",
+                        key=f"edit_save_{branch}_{index}",
                         width="stretch",
-                        icon=":material/refresh:",
-                        on_click=regenerate,
+                        type="primary",
+                        icon=":material/check:",
+                        on_click=submit_edit,
+                        args=(index, f"edit_box_{branch}_{index}"),
+                    )
+                with cancel_col:
+                    st.button(
+                        "取消",
+                        key=f"edit_cancel_{branch}_{index}",
+                        width="stretch",
+                        icon=":material/close:",
+                        on_click=cancel_edit,
+                    )
+            else:
+                if msg.get("content"):
+                    st.markdown(msg["content"])
+                with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
+                                help="编辑这条消息；最后一条回答还能重新生成"):
+                    if index == last and msg.get("role") == "assistant":
+                        st.button(
+                            "重新生成",
+                            key=f"regen_{branch}_{index}",
+                            width="stretch",
+                            icon=":material/refresh:",
+                            on_click=regenerate,
+                            args=(index,),
+                        )
+                    st.button(
+                        "编辑这条",
+                        key=f"edit_{branch}_{index}",
+                        width="stretch",
+                        icon=":material/edit:",
+                        on_click=start_edit,
                         args=(index,),
                     )
+                    # 分支切换箭头：只在同源分支之间循环（‹ 2/3 ›）
+                    if len(siblings) > 1:
+                        position = siblings.index(branch) if branch in siblings else 0
+                        prev_branch = siblings[(position - 1) % len(siblings)]
+                        next_branch = siblings[(position + 1) % len(siblings)]
+                        nav = st.columns([1, 2, 1], vertical_alignment="center")
+                        with nav[0]:
+                            st.button(
+                                "", key=f"branch_prev_{branch}", icon=":material/chevron_left:",
+                                help=f"切到 {prev_branch}", on_click=switch_branch,
+                                args=(st.session_state.current_session, prev_branch),
+                            )
+                        with nav[1]:
+                            st.caption(f"分支 {position + 1}/{len(siblings)}")
+                        with nav[2]:
+                            st.button(
+                                "", key=f"branch_next_{branch}", icon=":material/chevron_right:",
+                                help=f"切到 {next_branch}", on_click=switch_branch,
+                                args=(st.session_state.current_session, next_branch),
+                            )
 
 def format_reasoning_html(text: str, streaming: bool = False) -> str:
     """把推理内容包装成紧凑样式的 HTML，流式时带光标。"""
@@ -1079,6 +1177,8 @@ st.session_state.setdefault("current_branch", "main")
 st.session_state.setdefault("_message_branch", st.session_state.current_branch)
 # 「重新生成」标记：按钮回调里只做标记，流式请求交给页面主体
 st.session_state.setdefault("pending_regen", False)
+# 正在就地编辑第几条消息（None = 没有在编辑）
+st.session_state.setdefault("editing_index", None)
 if "current_session" not in st.session_state:
     st.session_state.current_session = new_session_id()
 

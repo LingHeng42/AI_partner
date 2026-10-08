@@ -201,10 +201,21 @@ def _fake_write_stream(stream, *args, **kwargs):
 
 fake_st.write_stream = _fake_write_stream
 # 逻辑测试不跑页面分支：让输入类控件返回 None（在 streamlit 里就是"没有输入"）
-fake_st.chat_input = lambda *a, **k: None
-fake_st.toggle = lambda *a, **k: None
-fake_st.text_input = lambda *a, **k: None
-fake_st.text_area = lambda *a, **k: None
+# 但带 key 的输入控件会按 streamlit 的行为把值写进 session_state，
+# 否则 on_click 回调里从 session_state[input_key] 取值会拿到 None（编辑消息就是这样）
+def _state_writing(widget):
+    def call(*args, **kwargs):
+        key = kwargs.get("key")
+        if key is not None:
+            fake_st.session_state[key] = kwargs.get("value")
+        return None
+    return call
+
+
+fake_st.chat_input = _state_writing("chat_input")
+fake_st.toggle = _state_writing("toggle")
+fake_st.text_input = _state_writing("text_input")
+fake_st.text_area = _state_writing("text_area")
 
 fake_openai = types.ModuleType("openai")
 
@@ -831,6 +842,83 @@ check("请求带上被重新生成那条之前的历史",
 check("再次重新生成会再建一条分支",
       (lambda: (app.regenerate(3), app.st.session_state["current_branch"] == "b3")[1])())
 app.delete_session(regen_id)
+
+# --------------------------------------------------------------------------- #
+# 编辑消息：新建分支 + 从被编辑的位置重新生成（就像 DeepSeek 网页）
+# --------------------------------------------------------------------------- #
+edit_id = "2028-08-08_080808_000"
+fresh_state(current_session=edit_id, current_branch="main", session_title="编辑测试")
+app.st.session_state["message"] = [{"role": "user", "content": "原问题"},
+                                   {"role": "assistant", "content": "原回答"}]
+app.save_session()
+
+# 进入编辑态
+app.start_edit(0)
+check("进入编辑态", app.st.session_state["editing_index"] == 0)
+app.cancel_edit()
+check("可以取消编辑", app.st.session_state["editing_index"] is None)
+
+# 编辑用户消息 → 新分支（含改写后的用户消息）→ 生成新回答
+app.st.session_state["edit_box_main_0"] = "改写后的问题"
+app.submit_edit(0, "edit_box_main_0")
+check("编辑用户消息后新建分支", app.st.session_state["current_branch"] == "b2",
+      app.st.session_state["current_branch"])
+check("新分支里是被改写后的消息", msgs_of(edit_id, "b2") == [{"role": "user", "content": "改写后的问题"}],
+      msgs_of(edit_id, "b2"))
+check("原分支原样保留", [m["content"] for m in msgs_of(edit_id, "main")] == ["原问题", "原回答"],
+      msgs_of(edit_id, "main"))
+check("编辑后退出编辑态", app.st.session_state["editing_index"] is None)
+check("编辑用户消息后需要模型继续回答", app.st.session_state["pending_regen"] is True)
+check("新分支记下分叉点", [(b["parent"], b["fork_index"]) for b in app.load_session_meta(edit_id)["branches"]
+                          if b["id"] == "b2"] == [("main", 0)])
+edit_calls = []
+app.client = FakeClient(completions=FakeCompletions(chunks=["改写后的新回答"]))
+app.render_pending_regen()
+check("生成的新回答追加在改写后的消息之后",
+      [m["content"] for m in msgs_of(edit_id, "b2")] == ["改写后的问题", "改写后的新回答"],
+      msgs_of(edit_id, "b2"))
+check("编辑后原分支仍然只有两条", len(msgs_of(edit_id, "main")) == 2)
+check("编辑产生的分支被记为当前分支",
+      json.loads(meta_of(edit_id).read_text(encoding="utf-8"))["current_branch"] == "b2")
+
+# 编辑 AI 回复 → 新分支里放改写后的回答，且不再额外生成
+app.st.session_state["edit_box_b2_1"] = "我手写的回答"
+app.submit_edit(1, "edit_box_b2_1")
+check("编辑 AI 回复后新建分支", app.st.session_state["current_branch"] == "b3",
+      app.st.session_state["current_branch"])
+check("新分支 = 前缀 + 改写后的回答",
+      [m["content"] for m in msgs_of(edit_id, "b3")] == ["改写后的问题", "我手写的回答"],
+      msgs_of(edit_id, "b3"))
+check("编辑 AI 回复后不再触发生成", app.st.session_state["pending_regen"] is False)
+check("改写的 AI 回复不带旧推理内容", "reasoning_content" not in msgs_of(edit_id, "b3")[1],
+      msgs_of(edit_id, "b3")[1])
+check("b2 分支未被改动", [m["content"] for m in msgs_of(edit_id, "b2")] == ["改写后的问题", "改写后的新回答"])
+
+# 在分支上继续编辑：父分支记录成当前分支（嵌套分叉）
+app.switch_branch(edit_id, "b3")
+app.st.session_state["message"] = msgs_of(edit_id, "b3")
+app.st.session_state["edit_box_b3_0"] = "再改一次"
+app.submit_edit(0, "edit_box_b3_0")
+nested = app.st.session_state["current_branch"]
+check("在分支上编辑会再建分支", nested == "b4", nested)
+check("嵌套分叉的父分支是 b3",
+      [(b["parent"], b["fork_index"]) for b in app.load_session_meta(edit_id)["branches"]
+       if b["id"] == "b4"] == [("b3", 0)])
+check("兄弟分支关系正确", app.branch_siblings(edit_id, "b3") == ["b3"], app.branch_siblings(edit_id, "b3"))
+
+# 空内容不落盘、不建分支
+before_branches = app.branch_ids(edit_id)
+app.st.session_state["edit_box_b4_0"] = "   "
+app.submit_edit(0, "edit_box_b4_0")
+check("空内容不新建分支", app.branch_ids(edit_id) == before_branches, app.branch_ids(edit_id))
+check("空内容给出提示", errors.calls and "不能为空" in errors.calls[-1], errors.calls[-1:])
+
+# 切换回原分支：消息应换成原分支的内容
+app.switch_branch(edit_id, "main")
+app.st.session_state["message"] = msgs_of(edit_id, "main")
+check("切回原分支后消息是原始的", [m["content"] for m in app.st.session_state["message"]] == ["原问题", "原回答"],
+      app.st.session_state["message"])
+app.delete_session(edit_id)
 
 # --------------------------------------------------------------------------- #
 # 高级配置：请求参数是否按配置拼装
