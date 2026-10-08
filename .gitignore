@@ -25,6 +25,3 @@ tests/.tmp/
 
 # git 历史的本地备份（bundle 里含有旧历史）
 *.bundle
-
-# 一次性维护脚本（只在本地跑过，不入库）
-tests/rewrite_history.py

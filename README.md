@@ -68,6 +68,25 @@ requirements.txt     依赖清单
 
 `tests/.tmp` 每次运行开头都会被清理，所以不会累积；需要立刻清掉时跑 `clean_tmp.py`。
 
+## 维护脚本
+
+`tests/rewrite_history.py` 用于把某些路径从 git 历史里彻底删除（例如误提交了
+`sessions/` 下的对话存档）：
+
+```bash
+.venv\Scripts\python.exe tests\rewrite_history.py refs/heads/main
+```
+
+它用 git 底层命令（`cat-file tree` + `mktree` + `commit-tree`）重建历史，
+不依赖 `git filter-branch`（在受限环境下会因 MSYS `sh.exe` 建不了信号管道而失败），
+也不依赖第三方库。除被删除的路径外，文件内容、提交信息、作者与时间都保持原样，
+**只影响传入的 ref**，其它 ref（如备份分支）不受影响。删完记得
+`git reflog expire --expire=now --all && git gc --prune=now`，否则旧对象仍被
+reflog 吊着；远端要 `git push --force-with-lease=<分支>:<推送前远端SHA>`。
+
+> `.gitignore` 里 `sessions/*` + `!sessions/.gitkeep` 保证存档**永远**不入库；
+> 注意 `sessions/*.json` 这种写法挡不住子目录（`branches/`、`attachments/`）。
+
 ## 会话存档格式
 
 一个会话一个目录，会话 ID 形如 `2026-01-01_120000_000`（毫秒级时间戳）：
