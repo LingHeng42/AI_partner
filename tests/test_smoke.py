@@ -98,8 +98,22 @@ wrapper = write_wrapper(
 #     存档目录已通过 AI_PARTNER_SESSIONS_DIR 隔离到 tests/.tmp，不碰真实数据。
 # --------------------------------------------------------------------------- #
 sessions_dir = FAKE_SESSIONS
-for _f in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
-    _f.unlink()
+
+
+def _archive_entries():
+    """已落盘的会话：新结构目录 + 旧扁平文件。"""
+    if not sessions_dir.exists():
+        return []
+    return sorted(p.name for p in sessions_dir.iterdir() if p.name != "drafts")
+
+
+import shutil as _shutil
+
+for _p in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
+    _p.unlink()
+for _d in list(sessions_dir.iterdir()):
+    if _d.is_dir() and _d.name != "drafts":
+        _shutil.rmtree(_d, ignore_errors=True)
 
 at = AppTest.from_file(str(wrapper), default_timeout=60).run()
 import _fake_openai_smoke  # noqa: E402  脚本执行时已导入，这里拿到同一个模块对象
@@ -135,8 +149,7 @@ check("没有对话时不显示会话条目",
       not any("（当前）" in b.label for b in at.button), [b.label for b in at.button])
 check("空会话给出会话历史提示",
       any("还没有会话" in c.value for c in at.caption), [c.value for c in at.caption])
-check("启动阶段不创建空存档", not list(sessions_dir.glob("*.json")),
-      [f.name for f in sessions_dir.glob("*.json")])
+check("启动阶段不创建空存档", _archive_entries() == [], _archive_entries())
 check("启动阶段未发起任何模型请求", _fake_openai_smoke.STATE["calls"] == [])
 
 # --------------------------------------------------------------------------- #
@@ -153,10 +166,10 @@ if new_button is not None:
     check("新建会话后换新 ID", at.session_state["current_session"] != before, at.session_state["current_session"])
     check("新建会话后名称回到默认", at.session_state["session_title"] == "新会话", at.session_state["session_title"])
     check("新建会话后对话清空", at.session_state["message"] == [], at.session_state["message"])
-    check("新建会话不会创建空存档", not list(sessions_dir.glob("*.json")),
-          [f.name for f in sessions_dir.glob("*.json")])
-for leftover in sessions_dir.glob("*.json"):
-    leftover.unlink()
+    check("新建会话不会创建空存档", _archive_entries() == [], _archive_entries())
+for _d in list(sessions_dir.iterdir()):
+    if _d.is_dir() and _d.name != "drafts":
+        _shutil.rmtree(_d, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
 # D. 「第一轮对话后会话自动出现在历史里」的验证放在 tests/test_logic.py：
@@ -174,6 +187,9 @@ for leftover in sessions_dir.glob("*.json"):
 # 清理隔离目录（真实 sessions/ 从未被触碰，也没有"备份-删除-还原"这种危险操作）
 for _f in list(sessions_dir.glob("*.json")) + list(sessions_dir.glob("*.tmp*")):
     _f.unlink()
+for _d in list(sessions_dir.iterdir()):
+    if _d.is_dir() and _d.name != "drafts":
+        _shutil.rmtree(_d, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
 # D. 会话条目的操作入口（置顶 / 重命名 / 删除）渲染检查放在 tests/test_row_render.py：

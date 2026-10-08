@@ -99,6 +99,8 @@ def reset_tmp() -> None:
     stale = [p.name for p in SESSIONS_DIR.iterdir()]
     if stale:
         sys.exit(f"测试存档目录不干净（{SESSIONS_DIR}）：{stale}")
+    # 草稿目录每次清空，避免上一个套件的草稿影响本次断言
+    shutil.rmtree(SESSIONS_DIR / "drafts", ignore_errors=True)
     # 护栏：绝不允许测试去动真实的 sessions/（曾经因为测试指向它而误删用户存档）
     real_sessions = (PROJECT / "sessions").resolve()
     if SESSIONS_DIR.resolve() == real_sessions or real_sessions in SESSIONS_DIR.resolve().parents:

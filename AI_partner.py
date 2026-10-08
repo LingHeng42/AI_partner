@@ -9,6 +9,7 @@
 import datetime
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -21,11 +22,16 @@ from openai import OpenAI
 BASE_DIR = Path(__file__).resolve().parent
 # 存档目录：默认 <项目>/sessions。测试用 AI_PARTNER_SESSIONS_DIR 指到临时目录，
 # 这样测试永远不会碰到真实存档（曾经因为测试清空真实目录而丢过用户数据）。
-SESSIONS_DIR = Path(
+ARCHIVE_DIR = Path(
     os.environ.get("AI_PARTNER_SESSIONS_DIR") or (BASE_DIR / "sessions")
 ).expanduser()
+# 每个会话一个子目录：<ARCHIVE_DIR>/<会话ID>/
+#   meta.json         会话级信息 + 当前分支指针
+#   branches/<分支ID>.json   一条分支 = 一条线性消息列表
+META_FILENAME = "meta.json"
+BRANCHES_SUBDIR = "branches"
 # 草稿目录：给"还没产生对话"的会话存人设/高级参数，不进会话历史
-DRAFTS_DIR = SESSIONS_DIR / "drafts"
+DRAFTS_DIR = ARCHIVE_DIR / "drafts"
 RESOURCES_DIR = BASE_DIR / "resources"
 LOGO_PATH = RESOURCES_DIR / "logo.png"
 
@@ -100,33 +106,195 @@ def profile_from_state() -> dict:
     return {key: st.session_state[key] for key in PROFILE_KEYS}
 
 
-def session_meta(session_name: str) -> dict:
-    """读某个存档的元信息（名称、昵称、是否置顶）；读不出来时给出安全默认值。
+def _session_dir(session_name: str) -> Path:
+    """某个会话的存档目录（一个会话一个目录，分支文件放在 branches/ 下）。"""
+    if not session_name or Path(session_name).name != session_name:
+        raise ValueError(f"非法会话名：{session_name!r}")
+    return ARCHIVE_DIR / session_name
 
-    还没产生对话的会话只有草稿，这里也会去草稿里读，保证侧边栏显示的是最新人设。
-    """
-    meta = {"title": session_name, "nickname": DEFAULT_PROFILE["nickname"], "pinned": False}
+
+def branches_dir(session_name: str) -> Path:
+    return _session_dir(session_name) / BRANCHES_SUBDIR
+
+
+def branch_path(session_name: str, branch_id: str) -> Path:
+    """某条分支的文件路径（分支 ID 同样只允许纯文件名，挡掉路径穿越）。"""
+    if not branch_id or Path(branch_id).name != branch_id:
+        raise ValueError(f"非法分支名：{branch_id!r}")
+    return branches_dir(session_name) / f"{branch_id}.json"
+
+
+def session_dir_exists(session_name: str) -> bool:
+    """会话是否已经以新结构（目录 + meta.json）存过盘。"""
     try:
-        path = _safe_session_path(session_name)
-        if not path.exists():
-            draft = draft_path(session_name)
-            if draft is not None and draft.exists():
-                path = draft
-            else:
-                return meta
+        return (_session_dir(session_name) / META_FILENAME).exists()
+    except ValueError:
+        return False
+
+
+def load_session_meta(session_name: str) -> dict:
+    """读会话级元信息：名称、置顶、当前分支、分支列表。
+
+    - 新结构：<会话目录>/meta.json
+    - 旧结构（扁平 <会话ID>.json）：现场合成一份等价元信息，首次保存时自动迁移
+    - 什么都没有：给出默认值（一个空会话，只有 main 分支）
+    """
+    try:
+        path = _session_dir(session_name) / META_FILENAME
+    except ValueError:
+        return default_session_meta(session_name)
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["_legacy"] = False
+            return data
+        except Exception:  # noqa: BLE001 - 元信息损坏时退化为默认值
+            return default_session_meta(session_name)
+    flat = _session_dir(session_name).with_suffix(".json")  # 兼容旧扁平存档
+    if flat.exists():
+        return _legacy_meta(session_name, flat)
+    return default_session_meta(session_name)
+
+
+def _branch(self_id: str, parent=None, fork_index=None) -> dict:
+    return {
+        "id": self_id,
+        "parent": parent,
+        "fork_index": fork_index,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def default_session_meta(session_name: str) -> dict:
+    """默认元信息：一个空会话，只有 main 分支。"""
+    return {
+        "title": session_name,
+        "pinned": False,
+        "current_branch": "main",
+        "branches": [_branch("main")],
+        "_legacy": False,
+    }
+
+
+def _legacy_meta(session_name: str, flat: Path) -> dict:
+    """把旧扁平存档合成新结构需要的元信息（先只读，落盘时再迁移）。"""
+    meta = default_session_meta(session_name)
+    try:
+        with flat.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return meta
+    meta["title"] = (data.get("title") or "").strip() or session_name
+    meta["pinned"] = bool(data.get("pinned"))
+    meta["_legacy"] = True
+    meta["_legacy_data"] = data  # 首次迁移时连同人设/高级参数一起搬过去
+    if isinstance(data.get("branches"), list):
+        meta["branches"] = normalize_branches(data["branches"])
+    return meta
+
+
+def normalize_branches(raw) -> list:
+    """把 branches 字段规整成 [{id, parent, fork_index, created_at}]。"""
+    out = []
+    for item in raw or []:
+        if isinstance(item, str):
+            out.append(_branch(item))
+        elif isinstance(item, dict) and item.get("id"):
+            out.append({
+                "id": str(item["id"]),
+                "parent": item.get("parent"),
+                "fork_index": item.get("fork_index"),
+                "created_at": item.get("created_at") or "",
+            })
+    return out or [_branch("main")]
+
+
+def branch_ids(session_name: str) -> list:
+    """该会话已有哪些分支（顺序即创建顺序，main 在最前）。"""
+    return [b["id"] for b in normalize_branches(load_session_meta(session_name).get("branches"))]
+
+
+def own_meta(meta: dict) -> dict:
+    """去掉内部字段，只留要写盘的部分（`_legacy*` 是只读兼容用的临时键）。"""
+    return {k: v for k, v in meta.items() if not k.startswith("_")}
+
+
+def write_session_meta(session_name: str, meta: dict) -> None:
+    """原子写 meta.json（调用方保证已 setdefault 出 current_branch）。"""
+    _write_json_atomic(_session_dir(session_name) / META_FILENAME, own_meta(meta))
+
+
+def read_branch(session_name: str, branch_id: str) -> dict:
+    """读一条分支的内容；没有文件时返回空消息列表。"""
+    try:
+        path = branch_path(session_name, branch_id)
+    except ValueError:
+        return {"message": []}
+    if not path.exists():
+        return {"message": []}
+    try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        meta["title"] = (data.get("title") or "").strip() or session_name
-        meta["nickname"] = (data.get("nickname") or "").strip() or DEFAULT_PROFILE["nickname"]
-        meta["pinned"] = bool(data.get("pinned"))
-    except Exception:  # noqa: BLE001 - 元信息损坏不该影响整个侧边栏
-        pass
-    return meta
+        return data if isinstance(data, dict) else {"message": []}
+    except Exception:  # noqa: BLE001 - 单个分支文件损坏不应影响其它分支
+        return {"message": []}
+
+
+def write_branch(session_name: str, branch_id: str, data: dict) -> None:
+    _write_json_atomic(branch_path(session_name, branch_id), data)
+
+
+def load_current_branch(session_name: str) -> dict:
+    """读"当前分支"指向的那条分支（旧扁平存档则读取它自己的 message）。"""
+    meta = load_session_meta(session_name)
+    data = meta.get("_legacy_data") if meta.get("_legacy") else None
+    if data is not None:
+        return {"message": data.get("message", [])}
+    return read_branch(session_name, meta.get("current_branch") or "main")
+
+
+def migrate_session(session_name: str) -> None:
+    """把旧扁平存档迁移成新结构：写 meta.json + branches/<分支>.json，然后删旧文件。
+
+    迁移只发生一次；任何"会写盘"的操作都会先调用它，所以旧会话一旦被改动
+    就自动升级，读操作则一直是只读兼容、不改动磁盘。
+    """
+    try:
+        directory = _session_dir(session_name)
+    except ValueError:
+        return
+    flat = directory.with_suffix(".json")
+    if not flat.exists() or (directory / META_FILENAME).exists():
+        return
+    try:
+        with flat.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"迁移旧存档失败（保留原文件）: {e}")
+        return
+    meta = default_session_meta(session_name)
+    meta["title"] = (data.get("title") or "").strip() or session_name
+    meta["pinned"] = bool(data.get("pinned"))
+    if isinstance(data.get("branches"), list):
+        meta["branches"] = normalize_branches(data["branches"])
+    branch_id = meta["current_branch"] = meta["branches"][0]["id"]
+    # 旧存档的人设与高级参数是会话级的，继续保留在 meta.json 里
+    for key in set(PROFILE_KEYS) | set(ADVANCED_KEYS):
+        if key in data:
+            meta[key] = data[key]
+    write_session_meta(session_name, meta)
+    write_branch(session_name, branch_id, {"message": data.get("message", [])})
+    try:
+        flat.unlink()
+    except OSError:
+        pass  # 删不掉也不影响新结构（读的时候优先看 meta.json）
 
 
 def session_title(session_name: str) -> str:
     """读某个存档的自定义会话名称；没设置过就回退成会话 ID（时间戳）。"""
-    return session_meta(session_name)["title"]
+    meta = load_session_meta(session_name)
+    return (meta.get("title") or "").strip() or session_name
 
 
 def _write_json_atomic(path: Path, data: dict) -> None:
@@ -157,18 +325,27 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 
 def _update_session_meta(session_name: str, **changes) -> None:
-    """就地更新存档（或草稿）里的元信息字段（title / pinned），保留其它内容。"""
-    path = _safe_session_path(session_name)
-    if not path.exists():
+    """更新会话级元信息（title / pinned 等），保留分支与人设。
+
+    还没产生对话的会话只有草稿，这里就改草稿。
+    """
+    if not session_dir_exists(session_name) and not session_file_exists(session_name):
         draft = draft_path(session_name)
         if draft is not None and draft.exists():
-            path = draft  # 还没产生对话的会话：改它的草稿
-        else:
+            try:
+                with draft.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data.update(changes)
+                _write_json_atomic(draft, data)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"更新失败: {e}")
             return
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    data.update(changes)
-    _write_json_atomic(path, data)
+        # 既没有存档也没有草稿：无事可做
+        return
+    migrate_session(session_name)
+    meta = load_session_meta(session_name)
+    meta.update(changes)
+    write_session_meta(session_name, meta)
 
 
 def rename_session(session_name: str, new_title: str = None, input_key: str = None) -> None:
@@ -211,11 +388,7 @@ def reset_profile() -> None:
 def draft_path(session_name: str = None):
     """草稿文件路径：给"还没产生对话"的会话存人设与高级参数。"""
     name = session_name or st.session_state.get("current_session")
-    if not name:
-        return None
-    try:
-        _safe_session_path(name)  # 借用同一套路径校验
-    except ValueError:
+    if not name or Path(name).name != name:
         return None
     return DRAFTS_DIR / f"{name}.draft"
 
@@ -242,75 +415,94 @@ def discard_draft(session_name: str = None) -> None:
 def _file_pinned() -> bool:
     """当前会话存档里的置顶状态。
 
-    置顶是单独由 set_pinned() 写进文件的；save_session() 只负责其它字段，
+    置顶是单独由 set_pinned() 写的；save_session() 只负责其它字段，
     不能拿内存里的值去覆盖它（否则改一次人设就会把置顶弄丢）。
     """
-    try:
-        path = _safe_session_path(st.session_state.get("current_session"))
-    except ValueError:
-        return False
-    if not path.exists():
+    name = st.session_state.get("current_session")
+    if not name:
         return False
     try:
-        with path.open("r", encoding="utf-8") as f:
-            return bool(json.load(f).get("pinned"))
+        return bool(load_session_meta(name).get("pinned"))
     except Exception:  # noqa: BLE001
         return False
 
 
 def save_session() -> None:
-    """把当前会话原子写入 sessions/<会话ID>.json。
+    """把当前会话落盘。
 
-    一条存档 = 会话名称 + 置顶 + 消息 + 人设 + 高级生成参数。
-    - 已经产生过对话：写正式存档，并清掉同名草稿
+    结构：会话级信息（名称/置顶/当前分支/分支列表/人设/高级参数）写 meta.json，
+    消息写 branches/<当前分支>.json。
+    - 已经产生过对话：写正式存档（首次会把旧扁平存档自动迁移），并清掉同名草稿
     - 还没有对话（比如刚新建就改了人设/参数）：只写 drafts/<会话ID>.draft，
       这样修改立刻落盘、又不会在会话历史里留下空条目
     """
-    if not st.session_state.get("current_session"):
+    session_name = st.session_state.get("current_session")
+    if not session_name:
         return
-    session_data = {
-        "title": st.session_state.get("session_title", ""),
-        "pinned": _file_pinned(),
-        "message": st.session_state.get("message", []),
-        **profile_from_state(),
-        # 高级生成参数跟着会话走：切回来还能保持这套温度/惩罚设置
-        **advanced_from_state(),
-    }
-    if not session_data["message"]:
-        save_draft(session_data)
+    messages = st.session_state.get("message", [])
+    if not messages:
+        save_draft({
+            "title": st.session_state.get("session_title", ""),
+            "message": [],
+            **profile_from_state(),
+            **advanced_from_state(),
+        })
         return
-    _write_json_atomic(SESSIONS_DIR / f"{st.session_state.current_session}.json", session_data)
+    migrate_session(session_name)
+    branch_id = st.session_state.get("current_branch") or "main"
+    meta = load_session_meta(session_name)
+    meta["title"] = st.session_state.get("session_title", "")
+    # 置顶由 set_pinned() 单独维护，这里不能覆盖
+    meta["pinned"] = bool(meta.get("pinned"))
+    ids = [b["id"] for b in normalize_branches(meta.get("branches"))]
+    if branch_id not in ids:
+        existing = meta.get("branches") or []
+        meta["branches"] = normalize_branches([*existing, _branch(branch_id)])
+        ids.append(branch_id)
+    meta["current_branch"] = branch_id
+    # 人设与高级参数是会话级的一套，跟着 meta 走
+    meta.update(profile_from_state())
+    meta.update(advanced_from_state())
+    write_branch(session_name, branch_id, {"message": messages})
+    write_session_meta(session_name, meta)
     discard_draft()
 
 
 def load_session_list() -> list:
     """会话历史：置顶的排在最前，其余按时间从新到旧。
 
-    只列出磁盘上真正存在的存档；新开但还没发言的会话不会出现（空对话不落盘）。
+    兼容两种结构：新结构（<会话ID>/meta.json 目录）与旧扁平存档（<会话ID>.json）。
+    空对话不落盘，所以这里列出来的都是聊过的会话。
     """
-    if not SESSIONS_DIR.exists():
+    if not ARCHIVE_DIR.exists():
         return []
-    names = [f.stem for f in SESSIONS_DIR.glob("*.json")]
+    names = set()
+    for entry in ARCHIVE_DIR.iterdir():
+        if entry.is_dir():
+            # 会话目录（drafts 等内部目录会被 session_dir_exists 过滤掉）
+            if (entry / META_FILENAME).exists() or entry.with_suffix(".json").exists():
+                names.add(entry.name)
+        elif entry.suffix == ".json":
+            names.add(entry.stem)  # 旧扁平存档
     # key 用字符串而非 datetime，省一次解析；会话 ID 是定长时间戳，字典序即时间序
-    return sorted(names, key=lambda n: (session_meta(n)["pinned"], n), reverse=True)
+    return sorted(names, key=lambda n: (load_session_meta(n).get("pinned", False), n), reverse=True)
 
 
-def _safe_session_path(session_name: str) -> Path:
-    """只允许纯文件名，挡掉 ../ 之类的路径穿越。"""
-    if not session_name or Path(session_name).name != session_name:
-        raise ValueError(f"非法会话名：{session_name!r}")
-    return SESSIONS_DIR / f"{session_name}.json"
+def _session_exists(session_name: str = None) -> bool:
+    """会话是否有实物落盘（新结构目录 或 旧扁平文件）。"""
+    name = session_name or st.session_state.get("current_session")
+    if not name or Path(name).name != name:
+        return False
+    try:
+        directory = ARCHIVE_DIR / name
+    except Exception:  # noqa: BLE001
+        return False
+    return (directory / META_FILENAME).exists() or directory.with_suffix(".json").exists()
 
 
 def session_file_exists(session_name: str = None) -> bool:
-    """当前会话是否已有存档文件（= 侧边栏会话历史里能否列出它）。"""
-    name = session_name or st.session_state.get("current_session")
-    if not name:
-        return False
-    try:
-        return _safe_session_path(name).exists()
-    except ValueError:
-        return False
+    """当前会话是否已有存档（= 侧边栏会话历史里能否列出它）。"""
+    return _session_exists(session_name)
 
 
 def is_fresh_session() -> bool:
@@ -324,26 +516,32 @@ def is_fresh_session() -> bool:
 
 def load_selected_session(session_name: str) -> None:
     try:
-        path = _safe_session_path(session_name)
+        has_archive = _session_exists(session_name)
         draft = draft_path(session_name)
-        if not path.exists() and not (draft and draft.exists()):
+        has_draft = draft is not None and draft.exists()
+        if not has_archive and not has_draft:
             return
-        session_data = {}
-        if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                session_data = json.load(f)
+        if has_archive:
+            meta = load_session_meta(session_name)
+            st.session_state.message = load_current_branch(session_name).get("message", [])
+            # 会话级人设与参数：老存档把它们存在顶层，新结构存在 meta.json
+            restore = dict(meta)
+            restore.update({k: v for k, v in (meta.get("_legacy_data") or {}).items()})
         else:
             # 只有草稿（还没产生对话的会话）：恢复人设与参数，对话仍是空的
             with draft.open("r", encoding="utf-8") as f:
-                session_data = json.load(f)
-        st.session_state.message = session_data.get("message", [])
+                restore = json.load(f)
+            meta = default_session_meta(session_name)
+            meta["title"] = restore.get("title") or session_name
+            st.session_state.message = restore.get("message", [])
         for key, default in DEFAULT_PROFILE.items():
-            st.session_state[key] = session_data.get(key) or default
+            st.session_state[key] = restore.get(key) or default
         # 高级参数跟着会话走；老存档没这些字段就回退成默认值
-        apply_advanced(session_data)
-        # 会话名称与置顶状态存在存档里；老存档没这些字段就回退成默认值
-        st.session_state.session_title = (session_data.get("title") or "").strip() or session_name
-        st.session_state.session_pinned = bool(session_data.get("pinned"))
+        apply_advanced(restore)
+        # 会话名称与置顶状态；老存档没这些字段就回退成默认值
+        st.session_state.session_title = (restore.get("title") or "").strip() or session_name
+        st.session_state.session_pinned = bool(restore.get("pinned"))
+        st.session_state.current_branch = meta.get("current_branch") or "main"
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
@@ -376,21 +574,27 @@ def new_session() -> None:
     st.session_state.current_session = new_session_id()
     st.session_state.session_title = DEFAULT_SESSION_TITLE
     st.session_state.session_pinned = False
+    st.session_state.current_branch = "main"
     save_session()
 
 
 def delete_session(session_name: str) -> None:
+    """删除会话：整目录（含所有分支）与草稿一起清掉。"""
     try:
-        path = _safe_session_path(session_name)
-        if path.exists():
-            path.unlink()
-        discard_draft(session_name)  # 顺带清掉它的草稿
-        if session_name == st.session_state.current_session:
+        directory = _session_dir(session_name)
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
+        flat = directory.with_suffix(".json")  # 兼容还没迁移的旧扁平存档
+        if flat.exists():
+            flat.unlink()
+        discard_draft(session_name)
+        if session_name == st.session_state.get("current_session"):
             reset_profile()
             _reset_advanced()
             st.session_state.current_session = new_session_id()
             st.session_state.session_title = DEFAULT_SESSION_TITLE
             st.session_state.session_pinned = False
+            st.session_state.current_branch = "main"
     except Exception as e:  # noqa: BLE001
         st.error(f"删除会话失败: {e}")
         return
@@ -656,6 +860,8 @@ for _key, _value in DEFAULT_ADVANCED.items():
 st.session_state.setdefault("message", [])
 st.session_state.setdefault("thinking", False)
 st.session_state.setdefault("session_title", DEFAULT_SESSION_TITLE)
+# 当前所在分支（一条分支 = 一条线性消息列表；切换分支就是整体换掉 message）
+st.session_state.setdefault("current_branch", "main")
 if "current_session" not in st.session_state:
     st.session_state.current_session = new_session_id()
 
@@ -718,15 +924,16 @@ with st.sidebar:
         st.caption("还没有会话。发出第一条消息后，这里会出现本次会话。")
     for session in session_list:
         current = session == st.session_state.current_session
-        meta = session_meta(session)
-        # 当前会话的名称就在输入框里，直接用它，避免和输入框内容不一致。
+        meta = load_session_meta(session)
+        # 当前会话的名称/昵称直接取内存里的，避免与输入框内容不一致。
         # 「是不是当前会话」由按钮颜色（type=primary）表示，名称里不再加"（当前）"
         label = st.session_state.session_title if current else meta["title"]
+        nickname = st.session_state.nickname if current else (meta.get("nickname") or DEFAULT_PROFILE["nickname"])
         pin_mark = ":material/push_pin: " if meta["pinned"] else ""
         col1, col2 = st.columns([4, 1])
         with col1:
             st.button(
-                f"{pin_mark}{st.session_state.nickname if current else meta["nickname"]}-{label}",
+                f"{pin_mark}{nickname}-{label}",
                 width="stretch",
                 key=f"session_{session}",
                 help=f"会话 ID：{session}",

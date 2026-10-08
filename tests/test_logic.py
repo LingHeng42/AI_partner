@@ -261,9 +261,49 @@ check("Key 正常时原样返回", app.require_api_key() == saved_key)
 # --------------------------------------------------------------------------- #
 tmp = Path(__file__).resolve().parent / ".tmp" / "sessions"
 tmp.mkdir(parents=True, exist_ok=True)
-for _f in tmp.glob("*.json"):
+for _f in list(tmp.glob("*.json")):
     _f.unlink()
-app.SESSIONS_DIR = tmp
+for _d in list(tmp.glob("*/")):
+    if _d.name != "drafts":
+        import shutil as _shutil
+
+        _shutil.rmtree(_d, ignore_errors=True)
+app.ARCHIVE_DIR = tmp
+
+
+def meta_of(session_id, branch="main"):
+    """读某个会话的 meta.json。"""
+    return tmp / session_id / "meta.json"
+
+
+def msgs_of(session_id, branch="main"):
+    """读某条分支的消息列表（新结构：branches/<分支>.json）。"""
+    return json.loads((tmp / session_id / "branches" / f"{branch}.json").read_text(encoding="utf-8"))["message"]
+
+
+def branch_files(session_id):
+    return list((tmp / session_id / "branches").glob("*.json"))
+
+
+def session_dirs():
+    """已落盘的会话目录（排除 drafts 等内部目录）。"""
+    return sorted(
+        d.name for d in tmp.iterdir()
+        if d.is_dir() and d.name != "drafts"
+    )
+
+
+def _clear_sessions():
+    """清空所有会话（新结构目录 + 旧扁平文件），草稿目录保留。"""
+    import shutil as _shutil
+
+    for _f in list(tmp.glob("*.json")):
+        _f.unlink()
+    for _d in tmp.iterdir():
+        if _d.is_dir() and _d.name != "drafts":
+            _shutil.rmtree(_d, ignore_errors=True)
+
+
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
 app.st.session_state.update(app.DEFAULT_ADVANCED)
@@ -271,35 +311,41 @@ app.st.session_state["thinking"] = False
 app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
 app.st.session_state["session_title"] = "第一次聊天"
+app.st.session_state["current_branch"] = "main"
 
 app.save_session()
-saved = tmp / "2026-01-01_120000_000.json"
-check("会话存档写入成功", saved.exists())
+sid = "2026-01-01_120000_000"
+saved = tmp / sid / "meta.json"
+branch_file = tmp / sid / "branches" / "main.json"
+check("会话存档写入成功（目录 + meta.json）", saved.exists(), str(saved))
+check("消息写入当前分支文件", branch_file.exists(), str(branch_file))
 data = json.loads(saved.read_text(encoding="utf-8"))
-check("存档字段 = 名称 + 置顶 + 四大人设 + 高级参数 + message",
-      set(data) == set(app.PROFILE_KEYS) | set(app.ADVANCED_KEYS) | {"message", "title", "pinned"},
+branch_data = json.loads(branch_file.read_text(encoding="utf-8"))
+check("meta.json 含名称/置顶/人设/高级参数/分支指针",
+      set(data) >= set(app.PROFILE_KEYS) | set(app.ADVANCED_KEYS) | {"title", "pinned", "current_branch", "branches"},
       sorted(data))
-check("存档文件名始终是会话 ID", saved.name == "2026-01-01_120000_000.json", saved.name)
-check("原子写入不留 .tmp 残留", not list(tmp.glob("*.tmp")))
-check("会话列表按时间倒序", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
+check("分支文件只有消息", set(branch_data) == {"message"}, sorted(branch_data))
+check("分支指针指向 main", data["current_branch"] == "main", data.get("current_branch"))
+check("分支列表含 main", [b["id"] for b in data["branches"]] == ["main"], data.get("branches"))
+check("会话目录名就是会话 ID", saved.parent.name == sid, saved.parent.name)
+check("原子写入不留 .tmp 残留", not list(tmp.rglob("*.tmp*")), [p.name for p in tmp.rglob("*.tmp*")])
+check("会话列表按时间倒序", app.load_session_list() == [sid], app.load_session_list())
 
 # 自定义名称：显示用名称与文件名解耦
 check("会话名称被写入存档", data["title"] == "第一次聊天", data.get("title"))
-check("读回自定义会话名称", app.session_title("2026-01-01_120000_000") == "第一次聊天")
+check("读回自定义会话名称", app.session_title(sid) == "第一次聊天")
 check("默认不置顶", data["pinned"] is False, data.get("pinned"))
-check("session_meta 同时给出名称、昵称与置顶状态",
-      app.session_meta("2026-01-01_120000_000") == {"title": "第一次聊天",
-                                                    "nickname": app.DEFAULT_PROFILE["nickname"],
-                                                    "pinned": False},
-      app.session_meta("2026-01-01_120000_000"))
+check("会话元信息含昵称与置顶", app.load_session_meta(sid)["nickname"] == app.DEFAULT_PROFILE["nickname"])
+check("会话元信息含当前分支", app.load_session_meta(sid)["current_branch"] == "main")
 
 app.st.session_state["message"] = []
 app.st.session_state["nickname"] = "被覆盖"
 app.st.session_state["session_title"] = "被覆盖"
-app.load_selected_session("2026-01-01_120000_000")
+app.load_selected_session(sid)
 check("读取会话恢复消息", app.st.session_state["message"] == [{"role": "user", "content": "你好"}])
 check("读取会话恢复人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
 check("读取会话恢复名称", app.st.session_state["session_title"] == "第一次聊天", app.st.session_state["session_title"])
+check("读取会话恢复当前分支", app.st.session_state["current_branch"] == "main")
 
 # 高级生成参数随会话存档：调过之后再切回来，设置还在
 app.st.session_state.update({"temperature": 0.35, "top_p": 0.7, "limit_tokens": True,
@@ -310,29 +356,98 @@ check("高级参数写入存档", saved_advanced["temperature"] == 0.35 and save
       {k: saved_advanced.get(k) for k in app.ADVANCED_KEYS})
 app._reset_advanced()
 check("重置后回到默认值", app.st.session_state["temperature"] == app.DEFAULT_ADVANCED["temperature"])
-app.load_selected_session("2026-01-01_120000_000")
+app.load_selected_session(sid)
 check("切回会话恢复温度", app.st.session_state["temperature"] == 0.35, app.st.session_state["temperature"])
 check("切回会话恢复 top_p", app.st.session_state["top_p"] == 0.7, app.st.session_state["top_p"])
 check("切回会话恢复惩罚项", app.st.session_state["frequency_penalty"] == 0.5)
 check("切回会话恢复 max_tokens", app.st.session_state["max_tokens"] == 1024)
 check("切回会话恢复长度开关", app.st.session_state["limit_tokens"] is True)
 # 改名/置顶走的是"读出来改字段再写回"，不能把高级参数弄丢
-app.rename_session("2026-01-01_120000_000", "改名后")
+app.rename_session(sid, "改名后")
 after_rename = json.loads(saved.read_text(encoding="utf-8"))
 check("改名不影响已存的高级参数", after_rename["temperature"] == 0.35 and after_rename["max_tokens"] == 1024,
       {k: after_rename.get(k) for k in app.ADVANCED_KEYS})
-app.set_pinned("2026-01-01_120000_000", True)
+check("改名不动分支文件", json.loads(branch_file.read_text(encoding="utf-8"))["message"]
+      == [{"role": "user", "content": "你好"}])
+app.set_pinned(sid, True)
 after_pin = json.loads(saved.read_text(encoding="utf-8"))
 check("置顶不影响已存的高级参数", after_pin["temperature"] == 0.35, after_pin.get("temperature"))
-app.set_pinned("2026-01-01_120000_000", False)  # 还原，避免影响后面的排序断言
-# 只写了部分字段的存档：缺失项应回填默认值，名称回退成会话 ID
-partial = tmp / "2000-01-01_000000_000.json"
+app.set_pinned(sid, False)  # 还原，避免影响后面的排序断言
+# 旧扁平存档（只有部分字段）也要能读：视为单分支 main，缺失项回填默认值
+partial_id = "2000-01-01_000000_000"
+partial = tmp / f"{partial_id}.json"
 partial.write_text(json.dumps({"message": [], "nickname": "旧昵称"}, ensure_ascii=False), encoding="utf-8")
-app.load_selected_session("2000-01-01_000000_000")
-check("部分字段的存档能读出昵称", app.st.session_state["nickname"] == "旧昵称", app.st.session_state["nickname"])
+app.load_selected_session(partial_id)
+check("旧扁平存档能读出昵称", app.st.session_state["nickname"] == "旧昵称", app.st.session_state["nickname"])
 check("缺失的人设字段回填默认值", app.st.session_state["nature"] == app.DEFAULT_PROFILE["nature"])
-check("没有 title 的老存档回退成会话 ID", app.session_title("2000-01-01_000000_000") == "2000-01-01_000000_000",
-      app.session_title("2000-01-01_000000_000"))
+check("旧扁平存档回退成单分支 main", app.st.session_state["current_branch"] == "main")
+check("没有 title 的老存档回退成会话 ID", app.session_title(partial_id) == partial_id,
+      app.session_title(partial_id))
+check("读旧存档不会改动磁盘（只读兼容）", partial.exists())
+
+# --------------------------------------------------------------------------- #
+# 旧扁平存档 → 新结构：首次保存时自动迁移
+# --------------------------------------------------------------------------- #
+mig_id = "2001-02-03_040506_000"
+(tmp / f"{mig_id}.json").write_text(json.dumps({
+    "title": "迁移测试",
+    "pinned": True,
+    "message": [{"role": "user", "content": "旧消息"}, {"role": "assistant", "content": "旧回答"}],
+    "nickname": "旧昵称",
+    "temperature": 0.4,
+}, ensure_ascii=False), encoding="utf-8")
+app.migrate_session(mig_id)
+check("迁移后旧文件被移除", not (tmp / f"{mig_id}.json").exists())
+check("迁移后建立 meta.json", meta_of(mig_id).exists())
+check("迁移后建立 main 分支文件", (tmp / mig_id / "branches" / "main.json").exists())
+mig_meta = json.loads(meta_of(mig_id).read_text(encoding="utf-8"))
+check("迁移保留会话名称", mig_meta["title"] == "迁移测试", mig_meta.get("title"))
+check("迁移保留置顶", mig_meta["pinned"] is True, mig_meta.get("pinned"))
+check("迁移保留人设", mig_meta.get("nickname") == "旧昵称", mig_meta.get("nickname"))
+check("迁移保留高级参数", mig_meta.get("temperature") == 0.4, mig_meta.get("temperature"))
+check("迁移后的消息进入 main 分支", msgs_of(mig_id) == [{"role": "user", "content": "旧消息"},
+                                                        {"role": "assistant", "content": "旧回答"}])
+check("迁移后分支指针是 main", mig_meta["current_branch"] == "main")
+check("迁移后出现在会话列表里", mig_id in app.load_session_list(), app.load_session_list())
+check("迁移是幂等的（再跑一次不出错）", app.migrate_session(mig_id) is None)
+
+# --------------------------------------------------------------------------- #
+# 分支读写：第 2 层的分支操作建立在这几个原语上
+# --------------------------------------------------------------------------- #
+check("分支列表初始只有 main", app.branch_ids(mig_id) == ["main"], app.branch_ids(mig_id))
+check("读不存在的分支得到空消息", app.read_branch(mig_id, "b9") == {"message": []})
+app.write_branch(mig_id, "b2", {"message": [{"role": "user", "content": "另一条分支"}]})
+check("写分支后文件出现", (tmp / mig_id / "branches" / "b2.json").exists())
+check("两条分支各自独立", msgs_of(mig_id, "b2") == [{"role": "user", "content": "另一条分支"}]
+      and msgs_of(mig_id, "main")[0]["content"] == "旧消息")
+check("分支文件只有 message 字段",
+      set(json.loads((tmp / mig_id / "branches" / "b2.json").read_text(encoding="utf-8"))) == {"message"})
+
+# meta 落盘时不能把内部兼容字段写进去
+app.write_session_meta(mig_id, {"title": "写回测试", "_legacy": True, "_legacy_data": {"x": 1},
+                                "current_branch": "main", "branches": [{"id": "main"}]})
+raw_meta = json.loads(meta_of(mig_id).read_text(encoding="utf-8"))
+check("meta 落盘不写内部字段", not any(k.startswith("_") for k in raw_meta), sorted(raw_meta))
+check("meta 落盘保留 title", raw_meta["title"] == "写回测试", raw_meta.get("title"))
+check("分支表兼容字符串形式",
+      [b["id"] for b in app.normalize_branches(["main", "b2"])] == ["main", "b2"])
+
+# 旧文件优先于新建的旧文件名：迁移完成后读的是新结构
+check("迁移后 load_current_branch 读的是分支文件",
+      app.load_current_branch(mig_id)["message"][0]["content"] == "旧消息")
+
+# 删除会话：目录、分支、草稿一起清掉
+app.st.session_state["current_session"] = "2002-03-04_050607_000"
+app.st.session_state["message"] = []
+app.save_session()
+draft_of_deleted = app.draft_path("2002-03-04_050607_000")
+check("草稿已建立", draft_of_deleted.exists(), str(draft_of_deleted))
+app.st.session_state["current_session"] = "keep-after-delete"
+app.delete_session(mig_id)
+check("删除会话后目录连同分支一起消失", not (tmp / mig_id).exists())
+app.delete_session("2002-03-04_050607_000")
+check("删除会话时草稿一起清掉", not draft_of_deleted.exists(), str(draft_of_deleted))
+
 blank_title = tmp / "3000-01-01_000000_000.json"
 blank_title.write_text(json.dumps({"title": "  "}), encoding="utf-8")
 check("空 title 也回退成会话 ID", app.session_title("3000-01-01_000000_000") == "3000-01-01_000000_000",
@@ -348,15 +463,21 @@ app.st.session_state["current_session"] = "2999-12-31_235959_999"
 check("未落盘的新会话不出现在会话历史里",
       app.load_session_list() == ["2026-01-01_120000_000", "2000-01-01_000000_000"],
       app.load_session_list())
-check("未落盘的新会话没有文件", not (tmp / "2999-12-31_235959_999.json").exists())
+check("未落盘的新会话没有目录", not (tmp / "2999-12-31_235959_999").exists())
 
-check("合法会话名可解析", app._safe_session_path("2026-01-01_120000_000").name == "2026-01-01_120000_000.json")
+check("合法会话名可解析", app._session_dir("2026-01-01_120000_000").name == "2026-01-01_120000_000")
+check("合法分支名可解析", app.branch_path("2026-01-01_120000_000", "b2").name == "b2.json")
 for bad in ("../../evil", "a/b", "", "..\\evil"):
     try:
-        app._safe_session_path(bad)
-        check(f"拦截路径穿越 {bad!r}", False)
+        app._session_dir(bad)
+        check(f"拦截非法会话名 {bad!r}", False)
     except ValueError:
-        check(f"拦截路径穿越 {bad!r}", True)
+        check(f"拦截非法会话名 {bad!r}", True)
+    try:
+        app.branch_path("2026-01-01_120000_000", bad)
+        check(f"拦截非法分支名 {bad!r}", False)
+    except ValueError:
+        check(f"拦截非法分支名 {bad!r}", True)
 
 # --------------------------------------------------------------------------- #
 # 上下文截断与 system prompt
@@ -386,12 +507,15 @@ check("system prompt 无残留缩进", "\n                " not in built[0]["con
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
 app.st.session_state["session_title"] = "第一次聊天"
 app.delete_session("2026-01-01_120000_000")
-check("删除后文件消失", not saved.exists())
+check("删除后会话目录消失", not saved.exists())
+check("删除后分支文件一起消失", not (tmp / "2026-01-01_120000_000").exists())
 check("删除当前会话后换新 ID", app.st.session_state["current_session"] != "2026-01-01_120000_000")
 check("删除当前会话后清空消息", app.st.session_state["message"] == [])
 check("删除当前会话后重置人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
 check("删除当前会话后重置名称", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE,
       app.st.session_state["session_title"])
+check("删除当前会话后分支回到 main", app.st.session_state["current_branch"] == "main",
+      app.st.session_state["current_branch"])
 
 app.st.session_state["current_session"] = "keep-me"
 app.st.session_state["session_title"] = "保留的名字"
@@ -456,9 +580,9 @@ check("请求带上了 system + 历史", completions.calls[-1]["messages"][1] ==
 check("思考关闭时不发 reasoning_effort", "reasoning_effort" not in completions.calls[-1])
 check("思考关闭时 thinking=disabled", completions.calls[-1]["extra_body"] == {"thinking": {"type": "disabled"}})
 check("思考关闭时不渲染思考折叠面板", expanders.by_label("思考过程") == [], [s.label for s in expanders.sinks])
-check("回答后自动落盘", (tmp / "2026-01-01_120000_000.json").exists())
+check("回答后自动落盘", meta_of("2026-01-01_120000_000").exists())
 check("落盘内容包含新回答",
-      json.loads((tmp / "2026-01-01_120000_000.json").read_text(encoding="utf-8"))["message"][-1]["content"] == "你好，人类")
+      msgs_of("2026-01-01_120000_000")[-1]["content"] == "你好，人类")
 
 app.st.session_state["thinking"] = True
 app.render_reply(_Sink())
@@ -502,7 +626,7 @@ app.st.session_state["reasoning_panel"] = False
 app._remember_expander("reasoning_panel", "show_reasoning")
 check("用户手动折叠后被记住", app.st.session_state["show_reasoning"] is False, app.st.session_state["show_reasoning"])
 check("推理内容随会话落盘",
-      json.loads((tmp / "2026-01-01_120000_000.json").read_text(encoding="utf-8"))["message"][-1].get("reasoning_content")
+      msgs_of("2026-01-01_120000_000")[-1].get("reasoning_content")
       == "先看他问的是什么。嗯，得用第一人称回答。")
 
 # 带推理的历史回放：只对含推理的回答开折叠面板
@@ -579,8 +703,7 @@ check("高级参数真正传给了模型调用", app.client.chat.completions.cal
 # --------------------------------------------------------------------------- #
 # 新建会话回调 + 空对话不落盘（"首次创建对话会创建两次" 的回归测试）
 # --------------------------------------------------------------------------- #
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
 app.st.session_state.update(app.DEFAULT_ADVANCED)
@@ -590,7 +713,7 @@ app.st.session_state["current_session"] = "2026-01-01_120000_000"
 app.st.session_state["session_title"] = "旧名字"
 
 app.save_session()
-check("空对话不落盘", list(tmp.glob("*.json")) == [], [f.name for f in tmp.glob("*.json")])
+check("空对话不落盘", session_dirs() == [], session_dirs())
 
 # 模拟首次启动：只有内存里的会话，磁盘上没有 → 不应出现在会话历史里
 check("未落盘的会话不出现在会话历史", app.load_session_list() == [], app.load_session_list())
@@ -598,8 +721,8 @@ check("未落盘的会话不出现在会话历史", app.load_session_list() == [
 # 第一次真正发言
 app.st.session_state["message"] = [{"role": "user", "content": "你好"}]
 app.render_reply(_Sink())
-check("首次发言只产生一个存档", len(list(tmp.glob("*.json"))) == 1, [f.name for f in tmp.glob("*.json")])
-check("该存档就是当前会话", (tmp / "2026-01-01_120000_000.json").exists())
+check("首次发言只产生一个存档", len(session_dirs()) == 1, session_dirs())
+check("该存档就是当前会话", meta_of("2026-01-01_120000_000").exists())
 check("产生对话后才出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 # 新建会话：旧档保留，新会话在发言前不落盘、也不出现在列表里
@@ -609,8 +732,8 @@ new_id = app.st.session_state["current_session"]
 check("新建会话后换新 ID", new_id != "2026-01-01_120000_000")
 check("新建会话后名称回到默认", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE)
 check("新建会话后对话清空", app.st.session_state["message"] == [])
-check("旧会话仍保留在磁盘", (tmp / "2026-01-01_120000_000.json").exists())
-check("新会话发言前不落盘", not (tmp / f"{new_id}.json").exists())
+check("旧会话仍保留在磁盘", meta_of("2026-01-01_120000_000").exists())
+check("新会话发言前不落盘", not (tmp / new_id).exists())
 check("新会话发言前不出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 # 再次新建（连续点两次按钮）不应该产生任何空档
@@ -618,8 +741,8 @@ import time as _time
 _time.sleep(0.02)
 app.new_session()
 second_id = app.st.session_state["current_session"]
-check("连续新建会话不产生空档", list(tmp.glob("*.json")) == [tmp / "2026-01-01_120000_000.json"],
-      [f.name for f in tmp.glob("*.json")])
+check("连续新建会话不产生空档", session_dirs() == ["2026-01-01_120000_000"],
+      session_dirs())
 check("连续新建会话得到不同 ID", second_id != new_id)
 check("连续新建后会话历史仍只有已保存的那条", app.load_session_list() == ["2026-01-01_120000_000"],
       app.load_session_list())
@@ -635,8 +758,7 @@ check("第二个会话发言后历史有两条", app.load_session_list() == [sec
 # 侧边栏只做两件事：load_session_list() 取列表、用 current_session 判断是否当前。
 # 下面按这个顺序断言：发言 → 落盘 → 列表包含它 → 被标记为当前。
 # --------------------------------------------------------------------------- #
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 auto_id = "2099-03-03_000000_000"
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
@@ -654,7 +776,7 @@ app.client = FakeClient(completions=FakeCompletions())
 app.render_reply(_Sink())
 check("发言并落盘后不再是新建会话状态", app.is_fresh_session() is False)
 
-check("发言后自动落盘", (tmp / f"{auto_id}.json").exists(), [f.name for f in tmp.glob("*.json")])
+check("发言后自动落盘", meta_of(auto_id).exists(), session_dirs())
 check("发言后自动出现在会话历史里", auto_id in app.load_session_list(), app.load_session_list())
 check("它在历史里排在第一位（最新）", app.load_session_list()[0] == auto_id, app.load_session_list())
 check("侧边栏会把它标记为当前会话", app.st.session_state["current_session"] == auto_id)
@@ -670,8 +792,7 @@ reruns = _Recorder("rerun")
 app.st.rerun = reruns
 
 # 场景 1：全新会话的第一条消息 → 首次落盘 → 必须重跑
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
 app.st.session_state.update(app.DEFAULT_ADVANCED)
@@ -683,7 +804,7 @@ app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
 app.client = FakeClient(completions=FakeCompletions())
 app.render_reply(_Sink())
 check("新会话首次落盘后触发了重跑", len(reruns.calls) == 1, reruns.calls)
-check("重跑前会话已落盘", (tmp / "2099-04-04_000000_000.json").exists())
+check("重跑前会话已落盘", meta_of("2099-04-04_000000_000").exists())
 
 # 场景 2：已存在的会话继续聊天 → 不需要重跑
 reruns.calls.clear()
@@ -695,23 +816,21 @@ check("已有存档的会话继续聊天不重跑", len(reruns.calls) == 0, reru
 
 # 场景 3：全新会话 + 空回答 → 仍然会因为那条用户消息而首次落盘，所以要重跑一次
 reruns.calls.clear()
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.session_state["current_session"] = "2099-04-05_000000_000"
 app.st.session_state["message"] = [{"role": "user", "content": "空回答"}]
 app.client = FakeClient(completions=FakeCompletions(empty=True))
 app.render_reply(_Sink())
-check("全新会话的空回答也会落盘（用户消息在）", (tmp / "2099-04-05_000000_000.json").exists())
+check("全新会话的空回答也会落盘（用户消息在）", meta_of("2099-04-05_000000_000").exists())
 check("全新会话的空回答同样重跑一次", len(reruns.calls) == 1, reruns.calls)
 
 # 场景 4：完全没有消息 → 不落盘也不重跑
 reruns.calls.clear()
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.session_state["current_session"] = "2099-04-06_000000_000"
 app.st.session_state["message"] = []
 app.render_reply(_Sink())
-check("无消息时不落盘", list(tmp.glob("*.json")) == [], [f.name for f in tmp.glob("*.json")])
+check("无消息时不落盘", session_dirs() == [], session_dirs())
 check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)
 
 app.st.rerun = _Sink()
@@ -720,8 +839,7 @@ check("session_file_exists 能正确判断", app.session_file_exists("no-such") 
 # --------------------------------------------------------------------------- #
 # 草稿：还没产生对话时，改人设/高级参数也要立刻落盘，但不能进会话历史
 # --------------------------------------------------------------------------- #
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app._discard_all_drafts() if hasattr(app, "_discard_all_drafts") else None
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
@@ -734,7 +852,7 @@ app.st.session_state["session_title"] = "草稿会话"
 app.save_session()
 draft = app.DRAFTS_DIR / "2099-06-01_000000_000.draft"
 check("空对话时写的是草稿", draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
-check("空对话时不产生正式存档", not (tmp / "2099-06-01_000000_000.json").exists())
+check("空对话时不产生正式存档", not meta_of("2099-06-01_000000_000").exists())
 check("草稿不进会话历史", app.load_session_list() == [], app.load_session_list())
 check("草稿里存了人设", json.loads(draft.read_text(encoding="utf-8"))["nickname"] == app.DEFAULT_PROFILE["nickname"])
 
@@ -759,10 +877,10 @@ app.st.session_state["message"] = [{"role": "user", "content": "第一条"}]
 app.client = FakeClient(completions=FakeCompletions())
 app.st.session_state["current_session"] = "2099-06-01_000000_000"
 app.save_session()
-check("产生对话后建立正式存档", (tmp / "2099-06-01_000000_000.json").exists())
+check("产生对话后建立正式存档", meta_of("2099-06-01_000000_000").exists())
 check("转正后草稿被清掉", not draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
 check("转正后进入会话历史", app.load_session_list() == ["2099-06-01_000000_000"], app.load_session_list())
-saved_promoted = json.loads((tmp / "2099-06-01_000000_000.json").read_text(encoding="utf-8"))
+saved_promoted = json.loads(meta_of("2099-06-01_000000_000").read_text(encoding="utf-8"))
 check("转正后保留草稿里改过的人设", saved_promoted["nickname"] == "改过的昵称", saved_promoted.get("nickname"))
 check("转正后保留草稿里改过的参数", saved_promoted["temperature"] == 0.25, saved_promoted.get("temperature"))
 
@@ -790,8 +908,7 @@ for _f in list(app.DRAFTS_DIR.glob("*")):
 # --------------------------------------------------------------------------- #
 # 「新建会话」按钮的高亮状态：处于新建会话时高亮，产生对话后恢复
 # --------------------------------------------------------------------------- #
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.session_state["current_session"] = "2099-05-01_000000_000"
 app.st.session_state["message"] = []
 check("没有任何对话时属于新建会话状态（按钮高亮）", app.is_fresh_session() is True, app.is_fresh_session())
@@ -805,8 +922,7 @@ check("再次新建会话后重新高亮", app.is_fresh_session() is True, app.i
 # --------------------------------------------------------------------------- #
 # 重命名与置顶
 # --------------------------------------------------------------------------- #
-for _f in tmp.glob("*.json"):
-    _f.unlink()
+_clear_sessions()
 app.st.rerun = _Recorder("rerun")
 app.st.session_state = _State()
 app.st.session_state.update(app.DEFAULT_PROFILE)
@@ -821,9 +937,9 @@ app.save_session()
 app.rename_session("2026-05-05_120000_000", "崭新名字")
 check("重命名写入存档", app.session_title("2026-05-05_120000_000") == "崭新名字",
       app.session_title("2026-05-05_120000_000"))
-check("重命名不改变文件名", (tmp / "2026-05-05_120000_000.json").exists())
+check("重命名不改变文件名", meta_of("2026-05-05_120000_000").exists())
 check("重命名保留消息",
-      json.loads((tmp / "2026-05-05_120000_000.json").read_text(encoding="utf-8"))["message"]
+      msgs_of("2026-05-05_120000_000")
       == [{"role": "user", "content": "内容"}])
 check("重命名当前会话会同步输入框的值", app.st.session_state["session_title"] == "崭新名字",
       app.st.session_state["session_title"])
@@ -862,7 +978,7 @@ check("空名字回退成默认名称", app.session_title("2026-05-05_120000_000
 
 # 置顶
 app.set_pinned("2026-05-05_120000_000", True)
-check("置顶写入存档", app.session_meta("2026-05-05_120000_000")["pinned"] is True)
+check("置顶写入存档", app.load_session_meta("2026-05-05_120000_000")["pinned"] is True)
 check("置顶不影响名称", app.session_title("2026-05-05_120000_000") == app.DEFAULT_SESSION_TITLE)
 
 # 置顶排序（上一步已把 2026-05-05 置顶，所以先取消掉再验证时间倒序）
@@ -904,7 +1020,7 @@ check("新建会话后置顶状态归零", app.st.session_state["session_pinned"
 # 老存档没有 pinned 字段时按未置顶处理
 legacy_no_pin = tmp / "2026-05-07_120000_000.json"
 legacy_no_pin.write_text(json.dumps({"title": "老档", "message": []}), encoding="utf-8")
-check("缺 pinned 字段的老存档视为未置顶", app.session_meta("2026-05-07_120000_000")["pinned"] is False)
+check("缺 pinned 字段的老存档视为未置顶", app.load_session_meta("2026-05-07_120000_000")["pinned"] is False)
 legacy_no_pin.unlink()
 app.st.rerun = _Sink()
 

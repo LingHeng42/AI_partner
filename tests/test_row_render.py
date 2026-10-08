@@ -71,16 +71,24 @@ wrapper.write_text(
 )
 
 # --------------------------------------------------------------------------- #
-# 准备一条已置顶的测试会话（写在隔离目录里）
+# 准备一条已置顶的测试会话（写在隔离目录里，结构：<会话ID>/{meta.json,branches/}）
 # --------------------------------------------------------------------------- #
+import shutil as _shutil  # noqa: E402
+
 for stale in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
     stale.unlink()
-(FAKE_SESSIONS / f"{SESSION_ID}.json").write_text(
+for _d in list(FAKE_SESSIONS.iterdir()):
+    if _d.is_dir() and _d.name != "drafts":
+        _shutil.rmtree(_d, ignore_errors=True)
+SESSION_DIR = FAKE_SESSIONS / SESSION_ID
+(SESSION_DIR / "branches").mkdir(parents=True, exist_ok=True)
+(SESSION_DIR / "meta.json").write_text(
     json.dumps(
         {
             "title": "渲染检查会话",
             "pinned": True,
-            "message": [{"role": "user", "content": "历史消息"}],
+            "current_branch": "main",
+            "branches": [{"id": "main", "parent": None, "fork_index": None, "created_at": ""}],
             "nickname": "溟月",
             "nature": "测试性格",
             "role_description": "测试简介",
@@ -90,6 +98,18 @@ for stale in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp
     ),
     encoding="utf-8",
 )
+(SESSION_DIR / "branches" / "main.json").write_text(
+    json.dumps({"message": [{"role": "user", "content": "历史消息"}]}, ensure_ascii=False),
+    encoding="utf-8",
+)
+
+
+def meta_data():
+    return json.loads((SESSION_DIR / "meta.json").read_text(encoding="utf-8"))
+
+
+def branch_data(branch="main"):
+    return json.loads((SESSION_DIR / "branches" / f"{branch}.json").read_text(encoding="utf-8"))
 
 # --------------------------------------------------------------------------- #
 # 唯一一次真正执行应用脚本的渲染
@@ -129,12 +149,13 @@ if rename_box is not None:
     at = at.run()
     errors = [e.message for e in at.exception]
     check("回车重命名不抛异常", not errors, errors)
-    saved = json.loads((FAKE_SESSIONS / f"{SESSION_ID}.json").read_text(encoding="utf-8"))
+    saved = meta_data()
     check("回车重命名写入存档", saved["title"] == "改名后的会话", saved.get("title"))
-    check("重命名保留消息", len(saved.get("message", [])) == 1, saved.get("message"))
+    check("重命名保留消息", len(branch_data().get("message", [])) == 1, branch_data().get("message"))
     check("重命名保留置顶", saved.get("pinned") is True, saved.get("pinned"))
+    check("重命名保留分支指针", saved.get("current_branch") == "main", saved.get("current_branch"))
     check("重命名不留下临时文件",
-          not list(FAKE_SESSIONS.glob("*.tmp*")), [p.name for p in FAKE_SESSIONS.glob("*.tmp*")])
+          not list(FAKE_SESSIONS.rglob("*.tmp*")), [str(p) for p in FAKE_SESSIONS.rglob("*.tmp*")])
 
 # --------------------------------------------------------------------------- #
 # "改人设立刻落盘"的可观测结果（存档内容）由 tests/test_logic.py 断言：
