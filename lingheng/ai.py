@@ -9,6 +9,16 @@ from openai import OpenAI
 
 from . import branches, config, images, profile, sessions, store
 
+# 当前使用的模型客户端。由 ui.main() 每次重跑时通过 configure_client() 设置；
+# 测试可以直接替换它（或替换入口模块上的 client，见 _client()）。
+client = None
+
+
+def configure_client(new_client) -> None:
+    """设置本次脚本运行使用的客户端（ui.main() 每次重跑都会调一次）。"""
+    global client
+    client = new_client
+
 
 def _client():
     """取模型客户端。

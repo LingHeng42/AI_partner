@@ -34,7 +34,10 @@ def drafts_dir():
 
 
 
-BASE_DIR = Path(__file__).resolve().parent
+# 项目根目录。注意：本文件在 lingheng/ 包内，所以是 **上一级**——
+# 拆包时这里踩过坑：直接写 Path(__file__).parent 会让存档目录变成
+# lingheng/sessions/（而不是 <项目>/sessions），历史会话就"看不见"了。
+BASE_DIR = Path(__file__).resolve().parent.parent
 # 存档目录：默认 <项目>/sessions。测试用 AI_PARTNER_SESSIONS_DIR 指到临时目录，
 # 这样测试永远不会碰到真实存档（曾经因为测试清空真实目录而丢过用户数据）。
 ARCHIVE_DIR = Path(

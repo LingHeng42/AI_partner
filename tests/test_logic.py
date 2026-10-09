@@ -12,7 +12,7 @@ import time
 import types
 from pathlib import Path
 
-from _harness import PROJECT, TMP_DIR, app_source, real_png, ui_source  # noqa: F401  统一准备临时目录与环境变量
+from _harness import PROJECT, TMP_DIR, app_source, real_png, ui_source  # noqa: F401
 
 failures = []
 
@@ -1553,6 +1553,16 @@ time.sleep(0.05)
 second = app.new_session_id()
 check("间隔 50ms 的两次会话 ID 不同", first != second, f"{first} vs {second}")
 check("会话 ID 可被 strptime 解析", datetime.datetime.strptime(first, "%Y-%m-%d_%H%M%S_%f"))
+
+# 路径基准：BASE_DIR 必须是**项目根**。拆包时它曾算成 lingheng/ 包目录，
+# 于是存档写进了 lingheng/sessions/，已有会话就"看不见"了。
+# 测试会把存档目录隔离到 tests/.tmp，所以这里断言"在项目根之下、且不在包里"。
+_package_dir = PROJECT / "lingheng"
+check("存栏目录位于项目根之下", PROJECT in app.ARCHIVE_DIR.parents, app.ARCHIVE_DIR)
+check("存栏目录不在 lingheng 包内（拆包时踩过的坑）",
+      _package_dir not in app.ARCHIVE_DIR.parents, app.ARCHIVE_DIR)
+check("资源目录是项目根下的 resources/", app.RESOURCES_DIR == (PROJECT / "resources"), app.RESOURCES_DIR)
+check("按项目根找得到 logo", (PROJECT / "resources" / "logo.png").exists())
 
 src = app_source()
 for key in ("nature", "output_rules"):

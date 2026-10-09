@@ -25,3 +25,6 @@ tests/.tmp/
 
 # git 历史的本地备份（bundle 里含有旧历史）
 *.bundle
+
+# 存档只应放在项目根的 sessions/：包内这个目录是拆包时 BASE_DIR 算错留下的，防止再出现
+lingheng/sessions/

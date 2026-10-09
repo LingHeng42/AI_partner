@@ -73,5 +73,7 @@ def __dir__():
     return sorted(set(globals()) | set(_symbol_map()))
 
 
-# 执行页面。放在最后：此时上面的代理已就绪。
-_import("ui")
+# 执行页面：每次重跑都要真的调用一次。
+# 注意不能只靠 `import lingheng.ui`——import 有缓存，第二次重跑时模块已在
+# sys.modules 里、顶层代码不会再执行，页面就白屏了（真踩过这个坑）。
+_import("ui").main()
