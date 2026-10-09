@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: E402
+from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR, app_source, ui_source  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -127,14 +127,14 @@ check("每轮消息都渲染了分支计数（说明两轮都有箭头）",
       sum(1 for c in at.caption if (c.value or "").startswith("分支 ")) == 2,
       [c.value for c in at.caption])
 check("箭头 key 带消息序号（修复重复 key）",
-      'key=f"branch_prev_{branch}_{index}"' in (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
-      and 'key=f"branch_next_{branch}_{index}"' in (PROJECT / "AI_partner.py").read_text(encoding="utf-8"))
+      'key=f"branch_prev_{branch}_{index}"' in app_source()
+      and 'key=f"branch_next_{branch}_{index}"' in app_source())
 check("分支菜单里含重命名输入框", "重命名分支" in [t.label for t in at.text_input],
       [t.label for t in at.text_input])
 check("分支菜单里含删除按钮", any(label == "删除分支" for label in buttons), buttons)
 # 控件 key 必须带分支名：源码级检查（AppTest 不暴露未回填的 key）
-source = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
-branch_section = source.split("分支管理", 1)[-1].split("管理角色", 1)[0]
+source = app_source()
+branch_section = ui_source().split("分支管理", 1)[-1].split("管理角色", 1)[0]
 check("分支控件 key 带会话 ID 与分支名",
       'key=f"branch_{sid}_{branch}"' in branch_section
       and 'key=f"branch_rename_{sid}_{branch}"' in branch_section, "key 里缺少 sid/branch")

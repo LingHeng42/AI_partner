@@ -34,6 +34,23 @@ TMP_DIR = TESTS_DIR / ".tmp"
 # 旧目录即使残留也不会影响本次运行。
 SESSIONS_DIR = TMP_DIR / f"sessions_{os.getpid()}"
 
+# 应用实现拆到了 lingheng/ 包里，入口 AI_partner.py 只剩代理导出。
+# 那些"读源码做静态断言"的测试要用下面两个函数拿源码，别再去读入口文件。
+APP_PACKAGE = PROJECT / "lingheng"
+
+
+def app_source() -> str:
+    """整个应用的源码（各模块拼接），用于源码级断言。"""
+    parts = []
+    for path in sorted(APP_PACKAGE.glob("*.py")):
+        parts.append(f"# ===== {path.name} =====\n{path.read_text(encoding='utf-8')}")
+    return "\n".join(parts)
+
+
+def ui_source() -> str:
+    """页面渲染那一层（侧边栏与主区域）的源码。"""
+    return (APP_PACKAGE / "ui.py").read_text(encoding="utf-8")
+
 
 def real_png(pixel=(255, 0, 0)) -> bytes:
     """生成一张 1×1 的真实合法 PNG。

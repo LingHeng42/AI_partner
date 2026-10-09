@@ -12,7 +12,7 @@ import time
 import types
 from pathlib import Path
 
-from _harness import PROJECT, TMP_DIR, real_png  # noqa: F401  统一准备临时目录与环境变量
+from _harness import PROJECT, TMP_DIR, app_source, real_png, ui_source  # noqa: F401  统一准备临时目录与环境变量
 
 failures = []
 
@@ -990,6 +990,21 @@ class _FakeUpload:
         return self._data
 
 
+def upload_avatar(key, data):
+    """模拟"在当前会话里通过上传控件选好了图片"，然后走真实回调。
+
+    新会话进入时 _avatar_uploaded_for 会被重置（见 reset_avatar），
+    这里显式归零，避免被上一个测试留下的归属标记拦住。
+    """
+    errors.calls.clear()
+    app.st.session_state["_avatar_uploaded_for"] = None
+    app.st.session_state["_avatar_applied"] = None
+    app.st.session_state.set_widget_value(f"_uploader_{key}", _FakeUpload(data))
+    app.set_avatar(key)
+    if errors.calls:
+        # 回调里用 st.error 报告问题（格式不对/太大/落盘失败）时，把原因带出来
+        print(f"      （set_avatar 报告：{errors.calls[-1]}）")
+
 check("PNG 格式识别", app.image_suffix(PNG_BYTES) == "png")
 check("JPEG 格式识别", app.image_suffix(JPG_SAMPLE) == "jpg")
 check("GIF 格式识别", app.image_suffix(GIF_SAMPLE) == "gif")
@@ -1005,8 +1020,8 @@ check("默认没有自定义头像", app.current_avatar("user", avatar_id) is No
 check("默认没有自定义 AI 头像", app.current_avatar("assistant", avatar_id) is None)
 
 # 上传用户头像（走真实回调路径）
-app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(PNG_BYTES))
-app.set_avatar("user_avatar")
+errors.calls.clear()
+upload_avatar("user_avatar", PNG_BYTES)
 saved_rel = app.st.session_state["user_avatar"]
 check("上传后记录了相对路径", saved_rel and saved_rel.startswith("attachments/"), saved_rel)
 avatar_abs = tmp / avatar_id / saved_rel
@@ -1017,8 +1032,7 @@ check("current_avatar 返回绝对路径", str(app.current_avatar("user", avatar
 check("用户头像不影响 AI 头像", app.current_avatar("assistant", avatar_id) is None)
 
 # 上传 AI 头像
-app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(real_png((0, 255, 0))))
-app.set_avatar("assistant_avatar")
+upload_avatar("assistant_avatar", real_png((0, 255, 0)))
 check("AI 头像也设置成功", app.current_avatar("assistant", avatar_id) is not None)
 check("两个头像互不干扰", app.current_avatar("user", avatar_id) != app.current_avatar("assistant", avatar_id))
 
@@ -1042,19 +1056,16 @@ check("头像路径不出现在请求里", "attachments/" not in serialized)
 
 # 同一张图重复上传：内容哈希命名 → 复用同一个文件，不重复占空间
 files_before = sorted(p.name for p in app.attachments_dir(avatar_id).glob("*"))
-app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(PNG_BYTES))
-app.set_avatar("user_avatar")
+upload_avatar("user_avatar", PNG_BYTES)
 check("同内容图片不重复落盘",
       sorted(p.name for p in app.attachments_dir(avatar_id).glob("*")) == files_before)
 
 # 超大图与非法格式被拒绝（且不会改动已有设置）
-app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(b"x" * (app.MAX_AVATAR_BYTES + 1)))
-app.set_avatar("assistant_avatar")
+upload_avatar("assistant_avatar", b"x" * (app.MAX_AVATAR_BYTES + 1))
 check("超过大小限制的头像被拒绝",
       (json.loads(meta_of(avatar_id).read_text(encoding="utf-8")).get("assistant_avatar") or "").endswith(".png"))
 errors.calls.clear()
-app.st.session_state.set_widget_value("_uploader_assistant_avatar", _FakeUpload(b"totally not an image"))
-app.set_avatar("assistant_avatar")
+upload_avatar("assistant_avatar", b"totally not an image")
 check("非法格式的头像被拒绝并提示", errors.calls and "格式" in errors.calls[-1], errors.calls[-1:])
 
 # 存档里的路径不可信：越权路径读不到
@@ -1078,8 +1089,7 @@ app.new_session()  # 点「新建会话」
 second_id = app.st.session_state["current_session"]
 check("新建会话后头像回到默认", app.st.session_state["user_avatar"] is None)
 # 新会话还没产生对话（只有草稿），此时设置头像不能丢
-app.st.session_state.set_widget_value("_uploader_user_avatar", _FakeUpload(real_png((0, 0, 255))))
-app.set_avatar("user_avatar")
+upload_avatar("user_avatar", real_png((0, 0, 255)))
 second_rel = app.st.session_state["user_avatar"]
 check("新会话（只有草稿）设置头像后立刻生效", app.current_avatar("user") is not None, second_rel)
 check("新会话（只有草稿）的头像写进草稿",
@@ -1544,7 +1554,7 @@ second = app.new_session_id()
 check("间隔 50ms 的两次会话 ID 不同", first != second, f"{first} vs {second}")
 check("会话 ID 可被 strptime 解析", datetime.datetime.strptime(first, "%Y-%m-%d_%H%M%S_%f"))
 
-src = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+src = app_source()
 for key in ("nature", "output_rules"):
     check(f"默认 {key} 字面量只出现一次", src.count(app.DEFAULT_PROFILE[key]) == 1, src.count(app.DEFAULT_PROFILE[key]))
 # role_description 在源码里是跨行隐式拼接的，按片段校验唯一性
@@ -1555,7 +1565,7 @@ check("不再保留旧的迁移映射", "LEGACY_KEY_MAP" not in src)
 check("存档目录支持 AI_PARTNER_SESSIONS_DIR 隔离", "AI_PARTNER_SESSIONS_DIR" in src)
 # 会话列表的组件 key 不能带列表序号：删掉上面一条会整体上移，
 # 带序号会导致弹层展开状态/输入框内容串到下一条会话上
-sidebar_src = src.split('st.subheader("会话历史")', 1)[-1].split('st.subheader("管理角色")', 1)[0]
+sidebar_src = ui_source().split('st.subheader("会话历史")', 1)[-1].split('st.subheader("管理角色")', 1)[0]
 check("会话列表组件 key 不含列表序号", "{index}" not in sidebar_src, sidebar_src[:40])
 check("使用 Path 解析脚本目录", "Path(__file__).resolve().parent" in src)
 check("os.replace 原子落盘", "os.replace" in src)

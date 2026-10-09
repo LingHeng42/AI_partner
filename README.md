@@ -39,12 +39,39 @@ streamlit run AI_partner.py
 ## 项目结构
 
 ```
-AI_partner.py        应用主程序（单文件）
+AI_partner.py        入口（薄）：代理导出包里的名字，并执行页面
+lingheng/            应用实现
+  config.py            路径与常量：默认人设、system prompt、高级参数、.env 读取
+  store.py             存储原语：原子写 JSON、会话/分支/附件路径、会话 ID
+  profile.py           人设与高级生成参数的读写与重置
+  sessions.py          会话：元信息、分支文件、草稿、切换、新建、删除
+  branches.py          分支：新建、切换、改名、删除
+  images.py            会话内图片：格式校验、落盘、头像读写
+  ai.py                模型调用与对话流程：客户端、上下文、流式生成、重新生成、编辑
+  ui.py                页面渲染：主区域与侧边栏
 resources/           图标与示例图
 sessions/            对话存档（自动生成，已 gitignore）
 tests/               测试（不依赖网络）
 requirements.txt     依赖清单
 ```
+
+模块依赖是**单向**的（下层不导入上层），看代码时按这个顺序读最省事：
+
+```
+config → store → profile → sessions → branches → images → ai → ui
+```
+
+几个约定：
+
+- **存栏目录一律运行时取**：各模块写 `config.archive_dir()` 而不是直接用常量。
+  这样入口上写 `AI_partner.ARCHIVE_DIR = 临时目录` 就能整体切走（测试靠这个隔离数据）。
+  Python 的模块**不支持 `__setattr__`**（PEP 562 只给了 `__getattr__`），所以那种赋值
+  只会落在入口模块自己身上，必须回头查一次才生效。
+- **`AI_partner.py` 是代理层**：`app.什么名字` 都能读（转发到对应模块），
+  `app.X = 值` 对"运行时会回查入口"的东西（存档目录、模型客户端）也有效。
+  历史上写过的 `app.save_session(...)`、`app.DEFAULT_PROFILE` 等用法都照旧可用。
+- **`store.py` 不依赖 streamlit**，可以脱离页面单独测试。
+- 入口只负责"代理 + 执行页面"，不要再往里塞业务代码。
 
 ## 测试
 

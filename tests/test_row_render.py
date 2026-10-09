@@ -11,7 +11,7 @@
 import json
 import sys
 
-from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: F401
+from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR, app_source  # noqa: F401
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -164,20 +164,22 @@ if rename_box is not None:
 # 注：同一个测试进程里 AppTest 只有第一次渲染会真正执行应用脚本，
 #     所以"再渲染一次去点昵称输入框"这条路在本环境不可靠，不再强测。
 # --------------------------------------------------------------------------- #
-source = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+source = app_source()
 role_section = source.split('st.subheader("管理角色")', 1)[-1].split('st.subheader("生成参数")', 1)[0]
 check("人设输入框都挂了 on_change=save_session",
-      role_section.count("on_change=save_session") == 4, role_section.count("on_change=save_session"))
+      role_section.count("on_change=sessions.save_session") == 4,
+      role_section.count("on_change=sessions.save_session"))
 advanced_section = source.split("高级配置", 1)[-1]
 check("高级参数控件都挂了 on_change=save_session",
-      advanced_section.count("on_change=save_session") >= 5, advanced_section.count("on_change=save_session"))
-check("恢复默认值按钮会立刻落盘", "on_click=reset_advanced_and_save" in source)
+      advanced_section.count("on_change=sessions.save_session") >= 5,
+      advanced_section.count("on_change=sessions.save_session"))
+check("恢复默认值按钮会立刻落盘", "on_click=sessions.reset_advanced_and_save" in source)
 
 # --------------------------------------------------------------------------- #
 # key 稳定性：组件 key 不得包含列表序号
 # （"删掉上面一条后，⋯ 弹层串到下一条会话"的根因就是 index 进了 key）
 # --------------------------------------------------------------------------- #
-source = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
+source = app_source()
 sidebar_source = source.split("st.subheader(\"会话历史\")", 1)[-1].split("st.subheader(\"管理角色\")", 1)[0]
 check("侧边栏会话列表里不再出现 index 变量",
       "index" not in sidebar_source, sidebar_source[:0] or "found index")
