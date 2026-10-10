@@ -12,12 +12,16 @@
 
 import json
 import os
+from collections.abc import Mapping
 import sys
 from pathlib import Path
 
 import streamlit as st
 
 from . import config
+
+# 每次脚本运行只构造一次登录组件（原因见 _cached 的说明）
+_AUTH_CACHE_STATE = "_auth_instance"
 
 
 def _runtime_override(name):
@@ -32,10 +36,17 @@ def _runtime_override(name):
 # 登录配置（凭据表 + 签名 cookie 的密钥）
 # --------------------------------------------------------------------------- #
 def auth_enabled() -> bool:
-    """是否配置了登录。没配 = 本地开发模式（不做门控，方便自己调试）。"""
+    """是否配置了登录。没配 = 本地开发模式（不做门控，方便自己调试）。
+
+    测试用 ``AI_PARTNER_DISABLE_AUTH=1`` 显式关掉门控：测试不该依赖（也不该被）
+    开发者本机的 secrets 影响 —— 本地一旦有 secrets.toml，界面类测试就会停在登录页。
+    """
     override = _runtime_override("AUTH_ENABLED")
     if override is not None:
         return bool(override)
+    disabled = str(os.environ.get("AI_PARTNER_DISABLE_AUTH") or "").strip().lower()
+    if disabled in ("1", "true", "yes"):
+        return False
     return bool(_credentials_raw())
 
 
@@ -61,16 +72,22 @@ def _credentials_raw():
 
 
 def credentials() -> dict:
-    """解析成 dict；解析不出来返回空 dict（= 没有可用账号）。"""
+    """解析成 dict；解析不出来返回空 dict（= 没有可用账号）。
+
+    注意：``st.secrets[...]`` 返回的不是普通 dict，而是 Streamlit 的 ``AttrDict``
+    （dict 的子类但在某些版本里不是 ``dict`` 实例），所以这里必须按"映射"判断，
+    不能写 ``isinstance(raw, dict)``——否则会把已经解析好的配置当成字符串去
+    ``json.loads``，静默变成空配置（登录页就再也不出现了，真踩过这个坑）。
+    """
     raw = _credentials_raw()
     if not raw:
         return {}
-    if isinstance(raw, dict):
+    if isinstance(raw, Mapping):
         return dict(raw)
     text = str(raw)
     try:  # 也允许直接放一段 JSON 字符串（依赖少、复制粘贴方便）
         parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -93,22 +110,76 @@ def _cookie_config() -> dict:
     }
 
 
+def _plain(value):
+    """把 Streamlit 的只读配置对象（AttrDict / Secrets）深拷贝成普通 dict/list。
+
+    为什么必须这么做：streamlit-authenticator 默认 ``auto_hash=True``，构造时会
+    **就地**把明文密码改写成哈希——而 Streamlit 的 secrets 对象是只读的，就地赋值
+    会抛 ``TypeError: Secrets does not support item assignment``，登录页就再也出不来。
+    """
+    import copy
+
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _auth_cache_key():
+    """用来判断"配置变了没有"。只比形状，不比对具体凭据内容。"""
+    try:
+        creds = credentials()
+        users = tuple(sorted((creds.get("usernames") or {}).keys()))
+    except Exception:  # noqa: BLE001
+        users = ()
+    cookie = _cookie_config()
+    return (users, cookie["name"], cookie["key"], cookie["expiry_days"])
+
+
+def _cached(factory):
+    """每次脚本运行只构造一次（配置变了才重建）。
+
+    为什么必须缓存：``stauth.Authenticate(...)`` 内部会创建
+    ``extra_streamlit_components.CookieManager``，而它的组件 key 是写死的 ``"init"``。
+    同一次脚本运行里构造两次就会撞
+    ``StreamlitDuplicateElementKey: key='init'``——登录页直接报错点不进去。
+    （``login_form_allowed()`` 与 ``do_login()`` 都会取实例，所以很容易构造两次。）
+    """
+    key = _auth_cache_key()
+    cache = st.session_state.get(_AUTH_CACHE_STATE)
+    if cache is not None and cache[0] == key:
+        return cache[1]
+    instance = factory()
+    st.session_state[_AUTH_CACHE_STATE] = (key, instance)
+    return instance
+
+
 def _authenticator():
     """构造 streamlit-authenticator 实例；没装/没配置时返回 None（页面会给出提示）。"""
-    creds = credentials()
-    if not creds:
+    def build():
+        creds = credentials()
+        if not creds:
+            return None
+        try:
+            import streamlit_authenticator as stauth
+        except ImportError:
+            return None
+        try:
+            return stauth.Authenticate(
+                _plain(creds), _cookie_config()["name"],
+                _cookie_config()["key"], _cookie_config()["expiry_days"],
+            )
+        except Exception as exc:  # noqa: BLE001 - 配置写错时不要让整页崩，但必须留下原因
+            # 这里不能只是静默返回 None：线上表现为"登录页不出现/点不进去"，
+            # 排查时完全看不出原因。写到服务端日志（不会泄露凭据内容）。
+            print(f"[auth] 构造登录组件失败：{type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+            return None
+
+    if not credentials():
         return None
-    try:
-        import streamlit_authenticator as stauth
-    except ImportError:
-        return None
-    try:
-        return stauth.Authenticate(
-            dict(creds), _cookie_config()["name"],
-            _cookie_config()["key"], _cookie_config()["expiry_days"],
-        )
-    except Exception:  # noqa: BLE001 - 配置写错时不要让整页崩
-        return None
+    return _cached(build)
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +260,12 @@ def do_login() -> bool:
     authenticator = _authenticator()
     if authenticator is None:
         return False
-    authenticator.login(location="main")
+    # 显式给一个控件 key：不传时它内部用 "init" 之类的固定 key，重跑时容易撞上
+    # StreamlitDuplicateElementKey（登录页直接报错、点不进去）。
+    try:
+        authenticator.login(location="main", key="lingheng_login")
+    except TypeError:  # 老版本没有 key 参数
+        authenticator.login(location="main")
     return st.session_state.get("authentication_status") is True
 
 

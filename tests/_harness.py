@@ -231,6 +231,9 @@ os.environ["TMPDIR"] = str(TMP_DIR)
 os.environ["TEMP"] = str(TMP_DIR)
 os.environ["TMP"] = str(TMP_DIR)
 os.environ["DEEPSEEK_API_KEY"] = "sk-test-not-used"
+# 关掉登录门控：测试不该依赖（也不该被）开发者本机的 secrets.toml 影响。
+# 需要专门测登录门控的套件会自己把 AUTH_ENABLED 覆盖成 True。
+os.environ["AI_PARTNER_DISABLE_AUTH"] = "1"
 # 关键：把应用的存档目录隔离到临时目录
 os.environ["AI_PARTNER_SESSIONS_DIR"] = str(SESSIONS_DIR)
 # 让 tempfile 也把东西放进 TMP_DIR，别在系统临时目录里留下受限 ACL 的残留

@@ -49,6 +49,7 @@ import types  # noqa: E402
 
 sys.path.insert(0, str(TESTS_DIR))
 import _harness  # noqa: E402
+os.environ["AI_PARTNER_DISABLE_AUTH"] = "0"  # 这两套专门测登录门控，要把它打开
 
 PROJECT = _harness.PROJECT
 from streamlit.testing.v1 import AppTest  # noqa: E402

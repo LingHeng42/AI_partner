@@ -68,12 +68,25 @@ streamlit run AI_partner.py
 - 身份层单独放在 `lingheng/auth.py`，只对外暴露 `current_user_id()`；
   以后想换成 `st.login`（Google OIDC）只改这一个文件，上层不用动
 
+> ⚠️ **用户表必须用 `[AUTH_CREDENTIALS.usernames.用户名]` 分节写法**，不要写成单行
+> 内联表（`{ usernames = { owner = { ... } } }`）。Streamlit 自带的 TOML 解析器在
+> **两个及以上用户**时会报 `Invalid inline table value encountered`，导致**整个 secrets
+> 文件都读不到** —— 表现为"登录页不出现，直接让你填 API Key"。而 Python 内置的
+> `tomllib` 认为那种写法合法，所以本地很难试出来（这条有回归测试：
+> [tests/test_secrets_format.py](tests/test_secrets_format.py)）。
+
 配置模板见 [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)，
 密码哈希用 [tests/make_credentials.py](tests/make_credentials.py) 生成：
 
 ```bash
 .venv\Scripts\python.exe tests\make_credentials.py owner:你的密码 friend1:朋友1的密码
 ```
+
+### 测试时如何跳过登录
+
+界面类测试不该受开发者本机 `secrets.toml` 影响，所以测试默认用
+`AI_PARTNER_DISABLE_AUTH=1` 关掉登录门控（见 [tests/_harness.py](tests/_harness.py)）；
+专门测登录门控的套件会自己把它重新打开。
 
 ### 权限是 fail-closed 的
 
