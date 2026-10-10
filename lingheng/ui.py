@@ -7,7 +7,7 @@ import 有缓存，第二次重跑时顶层代码不会再执行，页面就白�
 
 import streamlit as st
 
-from . import ai, auth, branches, config, images, profile, sessions, store
+from . import ai, auth, branches, config, images, profile, sessions, storage, store
 
 
 def _page_config() -> None:
@@ -104,6 +104,18 @@ def main() -> None:
     _page_config()
     _render_login()          # 第一道门：你是谁（未配置登录时直接放行）
     _render_api_key_gate()   # 第二道门：用谁的 key
+
+    # 当前用户：**必须在任何存储读写之前**设置。存储层据此把读写限定在
+    # users/<用户名>/ 这棵子树里，所以一个用户不可能看到或碰到别人的会话。
+    uid = auth.current_user_id() or "local"
+    storage.set_current_uid(uid)
+    # 同一个浏览器换了账号时，清掉上一个账号的会话态，避免界面串位
+    # （磁盘上的数据本来就按用户隔离，这里只是不让内存里的旧会话"接着显示"）
+    if st.session_state.get("_uid") not in (None, uid):
+        for _key in ("current_session", "session_title", "current_branch",
+                     "_message_branch", "message", "pending_regen", "editing_index"):
+            st.session_state.pop(_key, None)
+    st.session_state["_uid"] = uid
 
     # 会话状态初始化
     for _key, _value in config.DEFAULT_PROFILE.items():

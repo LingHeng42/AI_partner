@@ -1,0 +1,4 @@
+﻿# 只给测试用的依赖：
+#   mongomock —— 用内存实现验证 MongoDB 后端的用户隔离与读写逻辑
+mongomock>=4.1
+

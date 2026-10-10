@@ -7,7 +7,7 @@ import os
 
 import streamlit as st
 
-from . import config, sessions, store
+from . import config, sessions, storage, store
 
 
 
@@ -95,11 +95,16 @@ def rename_branch(session_name: str, branch_id: str, new_id: str = None, input_k
         return
     try:
         old_path, new_path = store.branch_path(session_name, branch_id), store.branch_path(session_name, new_id)
-        if old_path.exists():
-            if new_path.exists():
-                st.error(f"分支文件已存在：{new_path.name}")
+        if storage.exists(old_path):
+            if storage.exists(new_path):
+                st.error(f"分支文件已存在：{new_id}.json")
                 return
-            os.replace(old_path, new_path)
+            # 本地后端可以直接改名；远程后端（MongoDB）只能复制一份再删旧的
+            if storage.backend_kind() == "local":
+                os.replace(storage.active().path(old_path), storage.active().path(new_path))
+            else:
+                storage.write_json(new_path, storage.read_json(old_path, {}) or {})
+                storage.delete(old_path)
         for item in items:
             if item["id"] == branch_id:
                 item["id"] = new_id
@@ -141,8 +146,8 @@ def delete_branch(session_name: str, branch_id: str) -> None:
         meta["current_branch"] = current
         sessions.write_session_meta(session_name, meta)
         path = store.branch_path(session_name, branch_id)
-        if path.exists():
-            path.unlink()
+        if storage.exists(path):
+            storage.delete(path)
         if session_name == st.session_state.get("current_session"):
             previous = st.session_state.get("current_branch")
             st.session_state.current_branch = current

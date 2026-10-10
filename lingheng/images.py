@@ -4,12 +4,17 @@
 """
 
 import hashlib
+import io
 
 import streamlit as st
 from PIL import Image
 
-from . import config, sessions, store
+from . import config, sessions, storage, store
 
+
+# 头像字节的运行时缓存：MongoDB 后端下没法把"远程字节"直接交给
+# st.chat_message（它要路径或图片对象），所以每次重跑读一次、缓存起来复用。
+_AVATAR_CACHE_STATE = "_avatar_bytes_cache"
 
 
 def image_suffix(data: bytes) -> str:
@@ -30,15 +35,18 @@ def store_image(session_name: str, data: bytes, suffix: str) -> str:
     """
     digest = hashlib.sha1(data).hexdigest()[:16]
     relative = f"{config.ATTACHMENTS_SUBDIR}/{digest}.{suffix}"
-    target = store.attachments_dir(session_name) / f"{digest}.{suffix}"
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+    key = f"{store.attachments_dir(session_name)}/{digest}.{suffix}"
+    if not storage.exists(key):
+        storage.write_bytes(key, data)
     return relative
 
 
-def avatar_file(session_name: str, key: str):
-    """某个角色的头像文件绝对路径；没设置过返回 None。"""
+def avatar_key(session_name: str, key: str):
+    """某个角色的头像在存储里的键名；没设置过返回 None。
+
+    存档里记的是"相对会话目录"的路径，这里拼成完整键名，并挡住越界路径
+    （存档内容不可全信）。
+    """
     relative = st.session_state.get(key)
     if not relative:
         return None
@@ -46,15 +54,46 @@ def avatar_file(session_name: str, key: str):
         base = store._session_dir(session_name)
     except ValueError:
         return None
-    candidate = (base / relative).resolve()
-    # 只允许读会话目录内的文件（存档里的路径不可信）
-    if base.resolve() not in candidate.parents or not candidate.is_file():
+    text = str(relative).replace("\\", "/").lstrip("/")
+    if ".." in text.split("/"):
         return None
-    return candidate
+    return f"{base}/{text}"
+
+
+def _cached_image(key: str):
+    """读一次头像字节并解码成 PIL 图片；失败返回 None。"""
+    cache = st.session_state.get(_AVATAR_CACHE_STATE)
+    if cache is None:
+        cache = {}
+        st.session_state[_AVATAR_CACHE_STATE] = cache
+    if key in cache:
+        return cache[key]
+    try:
+        data = storage.read_bytes(key)
+        image = Image.open(io.BytesIO(data)) if data else None
+        if image is not None:
+            image.load()  # 完整解码，坏图会在这里抛错
+    except Exception:  # noqa: BLE001 - 坏图/不支持的格式一律退回默认头像
+        image = None
+    cache[key] = image
+    return image
+
+
+def avatar_file(session_name: str, key: str):
+    """头像的实际内容；本地后端返回绝对路径（PIL 能直接开），Mongo 后端返回图片对象。
+
+    没设置过、文件不存在或内容坏掉时返回 None（调用方退回默认头像）。
+    """
+    storage_key = avatar_key(session_name, key)
+    if not storage_key or not storage.exists(storage_key):
+        return None
+    if storage.backend_kind() == "local":
+        return storage.active().path(storage_key)  # 本地：给路径，省一次拷贝
+    return _cached_image(storage_key)
 
 
 def current_avatar(role: str, session_name: str = None):
-    """给 st.chat_message 用的头像参数（本地绝对路径）；没有可用头像时返回 None。
+    """给 st.chat_message 用的头像参数；没有可用头像时返回 None。
 
     "可用"要真的验证过：文件存在还不够——损坏的图片、或 Streamlit 解不开的格式
     会让 st.chat_message 直接抛错并打断整个页面。这里**真正解码一遍**再交给它
@@ -62,15 +101,17 @@ def current_avatar(role: str, session_name: str = None):
     保证页面永远能渲染出来。
     """
     key = "user_avatar" if role == "user" else "assistant_avatar"
-    path = avatar_file(session_name or st.session_state.get("current_session"), key)
-    if path is None:
+    source = avatar_file(session_name or st.session_state.get("current_session"), key)
+    if source is None:
         return None
+    if not isinstance(source, (str, bytes)) and hasattr(source, "load"):
+        return source  # 已经是解码好的图片对象（Mongo 后端）
     try:
-        with Image.open(path) as probe:
+        with Image.open(source) as probe:
             probe.load()  # 完整解码，坏图会在这里抛错
     except Exception:  # noqa: BLE001 - 坏图/不支持的格式一律退回默认头像
         return None
-    return path
+    return source
 
 
 def set_avatar(key: str) -> None:

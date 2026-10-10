@@ -80,23 +80,49 @@ streamlit run AI_partner.py
 `ALLOWED_USERS` **留空或写错 = 谁都不能用你的 Key**（而不是谁都能用）。
 宁可大家各自填 Key，也不要出现"配置一出问题就全员花站长钱"。收回权限同理：从名单里删掉即可。
 
+### 会话存在哪（按用户隔离）
+
+会话**按用户分区**存放，键名形状两种后端一致：
+
+```
+users/<用户名>/sessions/<会话ID>/meta.json              会话级信息
+users/<用户名>/sessions/<会话ID>/branches/<分支>.json    一条分支 = 一条消息列表
+users/<用户名>/sessions/<会话ID>/attachments/<哈希>.png  会话内图片（头像）
+users/<用户名>/sessions/drafts/<会话ID>.draft            还没产生对话时的草稿
+```
+
+- **配了 `MONGO_URI`** → 用 MongoDB（**线上用这个**）。每个文件是一条文档
+  （`lingheng.files`，字段 `uid` / `key` / `data`），图片与 JSON 一视同仁。
+- **没配** → 用本地文件系统（本地开发/测试）。
+
+**为什么线上必须接数据库**：Community Cloud 的容器本地文件**随时会被重置**
+（休眠、改设置、push 代码、平台维护都会触发），不接外部存储的话会话历史会丢。
+
+隔离是在**存储层**做的：业务代码只写 `sessions/<会话ID>/...` 这样的相对键名，
+由 [lingheng/storage.py](lingheng/storage.py) 自动加上 `users/<用户名>/` 前缀。
+这样各个调用点都不需要知道"当前是谁"，也就不会出现"某个地方忘了带用户名 → 串会话"。
+用户身份由 `storage.set_current_uid()` 设置（`ui.main()` 每次重跑都会先设置它）。
+
+对应的防回归测试是 [tests/test_user_isolation.py](tests/test_user_isolation.py)：
+**两种后端各跑一遍**"看不到、读不到、也删不掉别人的会话"，外加路径穿越检查。
+
 ### 部署到 Community Cloud 的注意事项
 
-1. **容器本地文件随时会被重置**（休眠、改设置、push 代码、平台维护都会触发），
-   所以 `sessions/` 里的存档在线上**不可持久**。多人使用时建议把会话存到外部数据库
-   （MongoDB Atlas 免费层等），不要依赖本地文件。
-2. `DEEPSEEK_API_KEY`、`ALLOWED_USERS`、`COOKIE_KEY`、`AUTH_CREDENTIALS` 都配在
-   App 的 **Settings → Secrets**，不要写进仓库。
+1. `DEEPSEEK_API_KEY`、`ALLOWED_USERS`、`COOKIE_KEY`、`AUTH_CREDENTIALS`、`MONGO_URI`
+   都配在 App 的 **Settings → Secrets**，不要写进仓库。
+2. 启动命令仍是 `streamlit run AI_partner.py`；`pymongo` 已加进 `requirements.txt`。
 3. **仓库私有 ≠ 应用私有**：应用可见性由 App 设置决定，与仓库无关。
    因为 `streamlit-authenticator` 不开放自助注册，拿到链接的陌生人没有账号密码也进不来。
+4. 会话存在数据库里，所以**本地 `sessions/` 目录只在本地开发时才有内容**。
 
 ## 项目结构
 
 ```
 AI_partner.py        入口（薄）：代理导出包里的名字，并执行页面
 lingheng/            应用实现
-  config.py            路径与常量：默认人设、system prompt、高级参数、.env 读取
-  store.py             存储原语：原子写 JSON、会话/分支/附件路径、会话 ID
+  config.py            路径与常量：默认人设、system prompt、高级参数、密钥与名单、.env 读取
+  storage.py           存储后端：本地文件 / MongoDB 二选一，并负责**按用户分区**
+  store.py             存储原语：会话/分支/附件的键名、会话 ID、草稿路径
   profile.py           人设与高级生成参数的读写与重置
   sessions.py          会话：元信息、分支文件、草稿、切换、新建、删除
   branches.py          分支：新建、切换、改名、删除

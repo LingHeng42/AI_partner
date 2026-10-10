@@ -12,6 +12,7 @@ import time
 import types
 from pathlib import Path
 
+import _harness  # noqa: E402  路径辅助（存档按用户分区后要换算真实路径）
 from _harness import PROJECT, TMP_DIR, app_source, real_png, ui_source  # noqa: F401
 
 failures = []
@@ -344,48 +345,51 @@ app.st.stop = _Sink()
 
 # --------------------------------------------------------------------------- #
 # 会话存档
+#
+# 存档现在按用户分区（users/<用户名>/sessions/...），所以测试不再自己拼目录，
+# 统一用 _harness 里的 archive_path 家族把"存储键名"换成真实路径。
 # --------------------------------------------------------------------------- #
-tmp = Path(__file__).resolve().parent / ".tmp" / "sessions"
-tmp.mkdir(parents=True, exist_ok=True)
-for _f in list(tmp.glob("*.json")):
-    _f.unlink()
-for _d in list(tmp.glob("*/")):
-    if _d.name != "drafts":
-        import shutil as _shutil
-
-        _shutil.rmtree(_d, ignore_errors=True)
+tmp = _harness.TMP_DIR / f"sessions_{os.getpid()}"   # = _harness.SESSIONS_DIR
 app.ARCHIVE_DIR = tmp
 
 
 def meta_of(session_id, branch="main"):
-    """读某个会话的 meta.json。"""
-    return tmp / session_id / "meta.json"
+    """某个会话的 meta.json 真实路径。"""
+    return _harness.session_meta_path(session_id)
+
+
+def branch_of(session_id, branch="main"):
+    """某条分支文件的真实路径。"""
+    return _harness.session_branch_path(session_id, branch)
 
 
 def msgs_of(session_id, branch="main"):
-    """读某条分支的消息列表（新结构：branches/<分支>.json）。"""
-    return json.loads((tmp / session_id / "branches" / f"{branch}.json").read_text(encoding="utf-8"))["message"]
+    """读某条分支的消息列表。"""
+    return json.loads(branch_of(session_id, branch).read_text(encoding="utf-8"))["message"]
 
 
 def branch_files(session_id):
-    return list((tmp / session_id / "branches").glob("*.json"))
+    return list(_harness.session_dir(session_id).joinpath("branches").glob("*.json"))
 
 
 def session_dirs():
     """已落盘的会话目录（排除 drafts 等内部目录）。"""
-    return sorted(
-        d.name for d in tmp.iterdir()
-        if d.is_dir() and d.name != "drafts"
-    )
+    root = _harness.sessions_root()
+    if not root.exists():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and d.name != "drafts")
 
 
 def _clear_sessions():
-    """清空所有会话（新结构目录 + 旧扁平文件），草稿目录保留。"""
+    """清空所有会话（新结构目录 + 旧扁平文件），drafts 目录保留。"""
     import shutil as _shutil
 
-    for _f in list(tmp.glob("*.json")):
+    root = _harness.sessions_root()
+    if not root.exists():
+        return
+    for _f in list(root.glob("*.json")):
         _f.unlink()
-    for _d in tmp.iterdir():
+    for _d in root.iterdir():
         if _d.is_dir() and _d.name != "drafts":
             _shutil.rmtree(_d, ignore_errors=True)
 
@@ -401,8 +405,8 @@ app.st.session_state["current_branch"] = "main"
 
 app.save_session()
 sid = "2026-01-01_120000_000"
-saved = tmp / sid / "meta.json"
-branch_file = tmp / sid / "branches" / "main.json"
+saved = meta_of(sid)
+branch_file = branch_of(sid)
 check("会话存档写入成功（目录 + meta.json）", saved.exists(), str(saved))
 check("消息写入当前分支文件", branch_file.exists(), str(branch_file))
 data = json.loads(saved.read_text(encoding="utf-8"))
@@ -461,7 +465,8 @@ check("置顶不影响已存的高级参数", after_pin["temperature"] == 0.35, 
 app.set_pinned(sid, False)  # 还原，避免影响后面的排序断言
 # 旧扁平存档（只有部分字段）也要能读：视为单分支 main，缺失项回填默认值
 partial_id = "2000-01-01_000000_000"
-partial = tmp / f"{partial_id}.json"
+partial = _harness.legacy_flat_path(partial_id)
+partial.parent.mkdir(parents=True, exist_ok=True)
 partial.write_text(json.dumps({"message": [], "nickname": "旧昵称"}, ensure_ascii=False), encoding="utf-8")
 app.load_selected_session(partial_id)
 check("旧扁平存档能读出昵称", app.st.session_state["nickname"] == "旧昵称", app.st.session_state["nickname"])
@@ -475,7 +480,7 @@ check("读旧存档不会改动磁盘（只读兼容）", partial.exists())
 # 旧扁平存档 → 新结构：首次保存时自动迁移
 # --------------------------------------------------------------------------- #
 mig_id = "2001-02-03_040506_000"
-(tmp / f"{mig_id}.json").write_text(json.dumps({
+_harness.legacy_flat_path(mig_id).write_text(json.dumps({
     "title": "迁移测试",
     "pinned": True,
     "message": [{"role": "user", "content": "旧消息"}, {"role": "assistant", "content": "旧回答"}],
@@ -483,9 +488,9 @@ mig_id = "2001-02-03_040506_000"
     "temperature": 0.4,
 }, ensure_ascii=False), encoding="utf-8")
 app.migrate_session(mig_id)
-check("迁移后旧文件被移除", not (tmp / f"{mig_id}.json").exists())
+check("迁移后旧文件被移除", not _harness.legacy_flat_path(mig_id).exists())
 check("迁移后建立 meta.json", meta_of(mig_id).exists())
-check("迁移后建立 main 分支文件", (tmp / mig_id / "branches" / "main.json").exists())
+check("迁移后建立 main 分支文件", branch_of(mig_id).exists())
 mig_meta = json.loads(meta_of(mig_id).read_text(encoding="utf-8"))
 check("迁移保留会话名称", mig_meta["title"] == "迁移测试", mig_meta.get("title"))
 check("迁移保留置顶", mig_meta["pinned"] is True, mig_meta.get("pinned"))
@@ -503,11 +508,11 @@ check("迁移是幂等的（再跑一次不出错）", app.migrate_session(mig_i
 check("分支列表初始只有 main", app.branch_ids(mig_id) == ["main"], app.branch_ids(mig_id))
 check("读不存在的分支得到空消息", app.read_branch(mig_id, "b9") == {"message": []})
 app.write_branch(mig_id, "b2", {"message": [{"role": "user", "content": "另一条分支"}]})
-check("写分支后文件出现", (tmp / mig_id / "branches" / "b2.json").exists())
+check("写分支后文件出现", branch_of(mig_id, "b2").exists())
 check("两条分支各自独立", msgs_of(mig_id, "b2") == [{"role": "user", "content": "另一条分支"}]
       and msgs_of(mig_id, "main")[0]["content"] == "旧消息")
 check("分支文件只有 message 字段",
-      set(json.loads((tmp / mig_id / "branches" / "b2.json").read_text(encoding="utf-8"))) == {"message"})
+      set(json.loads(branch_of(mig_id, "b2").read_text(encoding="utf-8"))) == {"message"})
 
 # meta 落盘时不能把内部兼容字段写进去
 app.write_session_meta(mig_id, {"title": "写回测试", "_legacy": True, "_legacy_data": {"x": 1},
@@ -527,12 +532,12 @@ app.st.session_state["current_session"] = "2002-03-04_050607_000"
 app.st.session_state["message"] = []
 app.save_session()
 draft_of_deleted = app.draft_path("2002-03-04_050607_000")
-check("草稿已建立", draft_of_deleted.exists(), str(draft_of_deleted))
+check("草稿已建立", _harness.archive_path(draft_of_deleted).exists(), str(draft_of_deleted))
 app.st.session_state["current_session"] = "keep-after-delete"
 app.delete_session(mig_id)
-check("删除会话后目录连同分支一起消失", not (tmp / mig_id).exists())
+check("删除会话后目录连同分支一起消失", not _harness.session_dir(mig_id).exists())
 app.delete_session("2002-03-04_050607_000")
-check("删除会话时草稿一起清掉", not draft_of_deleted.exists(), str(draft_of_deleted))
+check("删除会话时草稿一起清掉", not _harness.archive_path(draft_of_deleted).exists(), str(draft_of_deleted))
 
 # --------------------------------------------------------------------------- #
 # 分支操作：新建 / 切换 / 改名 / 删除
@@ -586,7 +591,7 @@ check("切换不存在的分支会被拒绝", (lambda: (app.switch_branch(bsid, 
 app.st.session_state["current_branch"] = "b3"
 app.rename_branch(bsid, "b3", "毒舌版")
 check("改名后分支表更新", app.branch_ids(bsid) == ["main", "b2", "毒舌版"], app.branch_ids(bsid))
-check("改名后旧文件消失", not (tmp / bsid / "branches" / "b3.json").exists())
+check("改名后旧文件消失", not branch_of(bsid, "b3").exists())
 check("改名后新文件出现且内容不变", msgs_of(bsid, "毒舌版")[1]["content"] == "回答 C")
 check("改名后指针跟着改",
       json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "毒舌版")
@@ -602,7 +607,7 @@ app.delete_branch(bsid, "毒舌版")
 check("删除当前分支后跳回父分支",
       json.loads(meta_of(bsid).read_text(encoding="utf-8"))["current_branch"] == "main",
       json.loads(meta_of(bsid).read_text(encoding="utf-8")).get("current_branch"))
-check("删除后分支文件消失", not (tmp / bsid / "branches" / "毒舌版.json").exists())
+check("删除后分支文件消失", not branch_of(bsid, "毒舌版").exists())
 check("删除后状态同步", app.st.session_state["current_branch"] == "main")
 app.delete_branch(bsid, "b2")
 check("删到只剩 main", app.branch_ids(bsid) == ["main"], app.branch_ids(bsid))
@@ -619,7 +624,7 @@ sub_child = app.fork_branch(bsid, prefix=msgs_of(bsid, sub_parent),
 app.delete_branch(bsid, sub_parent)
 deep = [b for b in app.load_session_meta(bsid)["branches"] if b["id"] == sub_child]
 check("删父分支后子分支改挂到祖父", deep and deep[0]["parent"] == "main", deep)
-check("删父分支后子分支文件仍在", (tmp / bsid / "branches" / f"{sub_child}.json").exists())
+check("删父分支后子分支文件仍在", branch_of(bsid, sub_child).exists())
 
 # 分支 ID 只增不减：删掉中间一条后，新分支不会复用那个编号
 # （复用会让"ID 大小"和"创建先后"对不上，列表看起来像乱序）
@@ -666,9 +671,9 @@ check("重新进入会话时标记消息所属分支",
 # 清理掉这个测试会话，避免影响后面按会话列表排序的断言
 app.delete_session(bsid)
 app.st.session_state["current_session"] = "2026-01-01_120000_000"
-check("分支测试会话已清理", not (tmp / bsid).exists())
+check("分支测试会话已清理", not _harness.session_dir(bsid).exists())
 
-blank_title = tmp / "3000-01-01_000000_000.json"
+blank_title = _harness.legacy_flat_path("3000-01-01_000000_000")
 blank_title.write_text(json.dumps({"title": "  "}), encoding="utf-8")
 check("空 title 也回退成会话 ID", app.session_title("3000-01-01_000000_000") == "3000-01-01_000000_000",
       app.session_title("3000-01-01_000000_000"))
@@ -683,10 +688,15 @@ app.st.session_state["current_session"] = "2999-12-31_235959_999"
 check("未落盘的新会话不出现在会话历史里",
       app.load_session_list() == ["2026-01-01_120000_000", "2000-01-01_000000_000"],
       app.load_session_list())
-check("未落盘的新会话没有目录", not (tmp / "2999-12-31_235959_999").exists())
+check("未落盘的新会话没有目录", not _harness.session_dir("2999-12-31_235959_999").exists())
 
-check("合法会话名可解析", app._session_dir("2026-01-01_120000_000").name == "2026-01-01_120000_000")
-check("合法分支名可解析", app.branch_path("2026-01-01_120000_000", "b2").name == "b2.json")
+# 会话/分支名现在返回的是"存储键名"（相对路径，按用户分区由 storage 负责）
+check("合法会话名可解析",
+      app._session_dir("2026-01-01_120000_000") == "sessions/2026-01-01_120000_000",
+      app._session_dir("2026-01-01_120000_000"))
+check("合法分支名可解析",
+      app.branch_path("2026-01-01_120000_000", "b2") == "sessions/2026-01-01_120000_000/branches/b2.json",
+      app.branch_path("2026-01-01_120000_000", "b2"))
 for bad in ("../../evil", "a/b", "", "..\\evil"):
     try:
         app._session_dir(bad)
@@ -728,7 +738,7 @@ app.st.session_state["current_session"] = "2026-01-01_120000_000"
 app.st.session_state["session_title"] = "第一次聊天"
 app.delete_session("2026-01-01_120000_000")
 check("删除后会话目录消失", not saved.exists())
-check("删除后分支文件一起消失", not (tmp / "2026-01-01_120000_000").exists())
+check("删除后分支文件一起消失", not _harness.session_dir("2026-01-01_120000_000").exists())
 check("删除当前会话后换新 ID", app.st.session_state["current_session"] != "2026-01-01_120000_000")
 check("删除当前会话后清空消息", app.st.session_state["message"] == [])
 check("删除当前会话后重置人设", app.st.session_state["nickname"] == app.DEFAULT_PROFILE["nickname"])
@@ -1076,7 +1086,7 @@ errors.calls.clear()
 upload_avatar("user_avatar", PNG_BYTES)
 saved_rel = app.st.session_state["user_avatar"]
 check("上传后记录了相对路径", saved_rel and saved_rel.startswith("attachments/"), saved_rel)
-avatar_abs = tmp / avatar_id / saved_rel
+avatar_abs = _harness.session_dir(avatar_id) / saved_rel
 check("图片真的落盘到会话目录", avatar_abs.exists(), str(avatar_abs))
 check("落盘内容与上传一致", avatar_abs.read_bytes() == PNG_BYTES)
 check("current_avatar 返回绝对路径", str(app.current_avatar("user", avatar_id)) == str(avatar_abs.resolve()),
@@ -1107,10 +1117,11 @@ check("请求历史只有文本 content", all(isinstance(m["content"], str) for 
 check("头像路径不出现在请求里", "attachments/" not in serialized)
 
 # 同一张图重复上传：内容哈希命名 → 复用同一个文件，不重复占空间
-files_before = sorted(p.name for p in app.attachments_dir(avatar_id).glob("*"))
+_attach_dir = _harness.session_dir(avatar_id) / "attachments"
+files_before = sorted(p.name for p in _attach_dir.glob("*"))
 upload_avatar("user_avatar", PNG_BYTES)
 check("同内容图片不重复落盘",
-      sorted(p.name for p in app.attachments_dir(avatar_id).glob("*")) == files_before)
+      sorted(p.name for p in _attach_dir.glob("*")) == files_before)
 
 # 超大图与非法格式被拒绝（且不会改动已有设置）
 upload_avatar("assistant_avatar", b"x" * (app.MAX_AVATAR_BYTES + 1))
@@ -1145,7 +1156,7 @@ upload_avatar("user_avatar", real_png((0, 0, 255)))
 second_rel = app.st.session_state["user_avatar"]
 check("新会话（只有草稿）设置头像后立刻生效", app.current_avatar("user") is not None, second_rel)
 check("新会话（只有草稿）的头像写进草稿",
-      json.loads(app.draft_path(second_id).read_text(encoding="utf-8")).get("user_avatar") == second_rel)
+      json.loads(_harness.archive_path(app.draft_path(second_id)).read_text(encoding="utf-8")).get("user_avatar") == second_rel)
 app.load_selected_session(first_id)
 check("切回第一个会话仍是它的头像", app.st.session_state["user_avatar"] == saved_rel,
       app.st.session_state["user_avatar"])
@@ -1190,7 +1201,7 @@ check("同一张图不会被重复处理", app.st.session_state.get("user_avatar
 app.st.session_state["user_avatar"] = saved_rel  # 还原
 
 # 坏图片/解不开的内容：不能让整个页面崩（st.chat_message 会真去解码图片）
-broken_dir = tmp / avatar_id / "attachments"
+broken_dir = _harness.session_dir(avatar_id) / "attachments"
 broken_dir.mkdir(parents=True, exist_ok=True)
 # 只有 PNG 文件头、后面是垃圾：连解码都过不去
 (broken_dir / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"this-is-not-a-real-png-body")
@@ -1272,7 +1283,7 @@ check("新建会话后换新 ID", new_id != "2026-01-01_120000_000")
 check("新建会话后名称回到默认", app.st.session_state["session_title"] == app.DEFAULT_SESSION_TITLE)
 check("新建会话后对话清空", app.st.session_state["message"] == [])
 check("旧会话仍保留在磁盘", meta_of("2026-01-01_120000_000").exists())
-check("新会话发言前不落盘", not (tmp / new_id).exists())
+check("新会话发言前不落盘", not _harness.session_dir(new_id).exists())
 check("新会话发言前不出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
 
 # 再次新建（连续点两次按钮）不应该产生任何空档
@@ -1413,8 +1424,10 @@ app.st.session_state["current_session"] = "2099-06-01_000000_000"
 app.st.session_state["session_title"] = "草稿会话"
 
 app.save_session()
-draft = app.DRAFTS_DIR / "2099-06-01_000000_000.draft"
-check("空对话时写的是草稿", draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+# 草稿的键名由应用给出（sessions/drafts/<会话ID>.draft），这里换算成真实路径
+draft_key = app.draft_path("2099-06-01_000000_000")
+draft = _harness.archive_path(draft_key)
+check("空对话时写的是草稿", draft.exists(), draft_key)
 check("空对话时不产生正式存档", not meta_of("2099-06-01_000000_000").exists())
 check("草稿不进会话历史", app.load_session_list() == [], app.load_session_list())
 check("草稿里存了人设", json.loads(draft.read_text(encoding="utf-8"))["nickname"] == app.DEFAULT_PROFILE["nickname"])
@@ -1441,7 +1454,7 @@ app.client = FakeClient(completions=FakeCompletions())
 app.st.session_state["current_session"] = "2099-06-01_000000_000"
 app.save_session()
 check("产生对话后建立正式存档", meta_of("2099-06-01_000000_000").exists())
-check("转正后草稿被清掉", not draft.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+check("转正后草稿被清掉", not draft.exists(), [p.name for p in _harness.drafts_dir().glob("*")])
 check("转正后进入会话历史", app.load_session_list() == ["2099-06-01_000000_000"], app.load_session_list())
 saved_promoted = json.loads(meta_of("2099-06-01_000000_000").read_text(encoding="utf-8"))
 check("转正后保留草稿里改过的人设", saved_promoted["nickname"] == "改过的昵称", saved_promoted.get("nickname"))
@@ -1451,21 +1464,21 @@ check("转正后保留草稿里改过的参数", saved_promoted["temperature"] =
 app.st.session_state["current_session"] = "2099-06-02_000000_000"
 app.st.session_state["message"] = []
 app.save_session()
-draft2 = app.DRAFTS_DIR / "2099-06-02_000000_000.draft"
+draft2 = _harness.archive_path(app.draft_path("2099-06-02_000000_000"))
 check("第二个草稿已建立", draft2.exists())
 app.delete_session("2099-06-02_000000_000")
-check("删除会话时草稿一起清掉", not draft2.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+check("删除会话时草稿一起清掉", not draft2.exists(), [p.name for p in _harness.drafts_dir().glob("*")])
 
 # 「恢复默认值」按钮的回调：还原并落盘
 app.st.session_state["message"] = []
 app.st.session_state["current_session"] = "2099-06-03_000000_000"
 app.st.session_state.update({"temperature": 1.5, "top_p": 0.2})
 app.reset_advanced_and_save()
-draft3 = app.DRAFTS_DIR / "2099-06-03_000000_000.draft"
-check("恢复默认值后立刻落盘", draft3.exists(), [p.name for p in app.DRAFTS_DIR.glob("*")])
+draft3 = _harness.archive_path(app.draft_path("2099-06-03_000000_000"))
+check("恢复默认值后立刻落盘", draft3.exists(), [p.name for p in _harness.drafts_dir().glob("*")])
 check("恢复默认值后草稿里是默认参数",
       json.loads(draft3.read_text(encoding="utf-8"))["temperature"] == app.DEFAULT_ADVANCED["temperature"])
-for _f in list(app.DRAFTS_DIR.glob("*")):
+for _f in list(_harness.drafts_dir().glob("*")):
     _f.unlink()
 
 # --------------------------------------------------------------------------- #
@@ -1581,7 +1594,7 @@ app.new_session()
 check("新建会话后置顶状态归零", app.st.session_state["session_pinned"] is False)
 
 # 老存档没有 pinned 字段时按未置顶处理
-legacy_no_pin = tmp / "2026-05-07_120000_000.json"
+legacy_no_pin = _harness.legacy_flat_path("2026-05-07_120000_000")
 legacy_no_pin.write_text(json.dumps({"title": "老档", "message": []}), encoding="utf-8")
 check("缺 pinned 字段的老存档视为未置顶", app.load_session_meta("2026-05-07_120000_000")["pinned"] is False)
 legacy_no_pin.unlink()

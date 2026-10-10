@@ -12,6 +12,7 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _harness  # noqa: E402
 from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -68,17 +69,17 @@ _app.OpenAI = FakeOpenAI
     encoding="utf-8",
 )
 
-for _d in list(FAKE_SESSIONS.iterdir()):
+for _d in list(_harness.sessions_root().iterdir()):
     if _d.is_dir() and _d.name != "drafts":
         shutil.rmtree(_d, ignore_errors=True)
-SESSION_DIR = FAKE_SESSIONS / SESSION_ID
+SESSION_DIR = _harness.session_dir(SESSION_ID)
 (SESSION_DIR / "branches").mkdir(parents=True, exist_ok=True)
 (SESSION_DIR / "attachments").mkdir(parents=True, exist_ok=True)
 USER_AVATAR = "attachments/aaaa1111.png"
 AI_AVATAR = "attachments/bbbb2222.png"
 (SESSION_DIR / USER_AVATAR).write_bytes(real_png((255, 0, 0)))
 (SESSION_DIR / AI_AVATAR).write_bytes(real_png((0, 0, 255)))
-(SESSION_DIR / "meta.json").write_text(json.dumps({
+_harness.session_meta_path(SESSION_ID).write_text(json.dumps({
     "title": "头像渲染检查",
     "pinned": False,
     "current_branch": "main",
@@ -90,7 +91,7 @@ AI_AVATAR = "attachments/bbbb2222.png"
     "user_avatar": USER_AVATAR,
     "assistant_avatar": AI_AVATAR,
 }, ensure_ascii=False), encoding="utf-8")
-(SESSION_DIR / "branches" / "main.json").write_text(
+_harness.session_branch_path(SESSION_ID).write_text(
     json.dumps({"message": [{"role": "user", "content": "问题"},
                             {"role": "assistant", "content": "回答"}]}, ensure_ascii=False),
     encoding="utf-8")
@@ -175,9 +176,9 @@ if new_button is not None:
     # 无法在这一层观察；它由 tests/test_logic.py 里对 reset_avatar 的直接断言覆盖。
 
 # 清理隔离目录（真实 sessions/ 不会被触碰）
-for _f in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
+for _f in list(_harness.sessions_root().glob("*.json")) + list(_harness.sessions_root().glob("*.tmp*")):
     _f.unlink()
-for _d in list(FAKE_SESSIONS.iterdir()):
+for _d in list(_harness.sessions_root().iterdir()):
     if _d.is_dir() and _d.name != "drafts":
         shutil.rmtree(_d, ignore_errors=True)
 

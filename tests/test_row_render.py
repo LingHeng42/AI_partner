@@ -11,6 +11,7 @@
 import json
 import sys
 
+import _harness  # noqa: E402
 from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR, app_source  # noqa: F401
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -75,14 +76,15 @@ wrapper.write_text(
 # --------------------------------------------------------------------------- #
 import shutil as _shutil  # noqa: E402
 
-for stale in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
+for stale in list(_harness.sessions_root().glob("*.json")) + list(_harness.sessions_root().glob("*.tmp*")):
     stale.unlink()
-for _d in list(FAKE_SESSIONS.iterdir()):
+for _d in list(_harness.sessions_root().iterdir()):
     if _d.is_dir() and _d.name != "drafts":
         _shutil.rmtree(_d, ignore_errors=True)
-SESSION_DIR = FAKE_SESSIONS / SESSION_ID
+# 存档按用户分区（users/<用户名>/sessions/...），用 harness 辅助拿到真实路径
+SESSION_DIR = _harness.session_dir(SESSION_ID)
 (SESSION_DIR / "branches").mkdir(parents=True, exist_ok=True)
-(SESSION_DIR / "meta.json").write_text(
+_harness.session_meta_path(SESSION_ID).write_text(
     json.dumps(
         {
             "title": "渲染检查会话",
@@ -98,18 +100,18 @@ SESSION_DIR = FAKE_SESSIONS / SESSION_ID
     ),
     encoding="utf-8",
 )
-(SESSION_DIR / "branches" / "main.json").write_text(
+_harness.session_branch_path(SESSION_ID).write_text(
     json.dumps({"message": [{"role": "user", "content": "历史消息"}]}, ensure_ascii=False),
     encoding="utf-8",
 )
 
 
 def meta_data():
-    return json.loads((SESSION_DIR / "meta.json").read_text(encoding="utf-8"))
+    return json.loads(_harness.session_meta_path(SESSION_ID).read_text(encoding="utf-8"))
 
 
 def branch_data(branch="main"):
-    return json.loads((SESSION_DIR / "branches" / f"{branch}.json").read_text(encoding="utf-8"))
+    return json.loads(_harness.session_branch_path(SESSION_ID, branch).read_text(encoding="utf-8"))
 
 # --------------------------------------------------------------------------- #
 # 唯一一次真正执行应用脚本的渲染
@@ -155,7 +157,7 @@ if rename_box is not None:
     check("重命名保留置顶", saved.get("pinned") is True, saved.get("pinned"))
     check("重命名保留分支指针", saved.get("current_branch") == "main", saved.get("current_branch"))
     check("重命名不留下临时文件",
-          not list(FAKE_SESSIONS.rglob("*.tmp*")), [str(p) for p in FAKE_SESSIONS.rglob("*.tmp*")])
+          not list(_harness.user_root().rglob("*.tmp*")), [str(p) for p in _harness.user_root().rglob("*.tmp*")])
 
 # --------------------------------------------------------------------------- #
 # "改人设立刻落盘"的可观测结果（存档内容）由 tests/test_logic.py 断言：

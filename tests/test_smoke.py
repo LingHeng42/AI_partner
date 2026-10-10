@@ -10,6 +10,7 @@ import os
 import sys
 from pathlib import Path
 
+import _harness  # noqa: E402
 from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR  # noqa: F401
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -100,7 +101,7 @@ wrapper = write_wrapper(
 #     所有针对完整页面的断言都必须挂在这一段上。
 #     存档目录已通过 AI_PARTNER_SESSIONS_DIR 隔离到 tests/.tmp，不碰真实数据。
 # --------------------------------------------------------------------------- #
-sessions_dir = FAKE_SESSIONS
+sessions_dir = _harness.sessions_root()
 
 
 def _archive_entries():

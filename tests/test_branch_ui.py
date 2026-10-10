@@ -11,6 +11,7 @@ import shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _harness  # noqa: E402
 from _harness import PROJECT, SESSIONS_DIR as FAKE_SESSIONS, TMP_DIR, app_source, ui_source  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -53,17 +54,17 @@ _app.OpenAI = FakeOpenAI
 # --------------------------------------------------------------------------- #
 # 种一个"有两条分支、当前在 b2"的会话
 # --------------------------------------------------------------------------- #
-for stale in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
+for stale in list(_harness.sessions_root().glob("*.json")) + list(_harness.sessions_root().glob("*.tmp*")):
     stale.unlink()
-for _d in list(FAKE_SESSIONS.iterdir()):
+for _d in list(_harness.sessions_root().iterdir()):
     if _d.is_dir() and _d.name != "drafts":
         shutil.rmtree(_d, ignore_errors=True)
-SESSION_DIR = FAKE_SESSIONS / SESSION_ID
+SESSION_DIR = _harness.session_dir(SESSION_ID)
 (SESSION_DIR / "branches").mkdir(parents=True, exist_ok=True)
 # b2 与 b3 都从 main 的第 1 条分出来 → 互为兄弟分支（气泡里会出现 ‹ 2/3 › 箭头）。
 # 这正是曾经触发 StreamlitDuplicateElementKey 的场景：箭头曾只按"当前分支"命名 key，
 # 而它们是在每条消息的循环里渲染的，第二条消息就撞上了第一条的 key。
-(SESSION_DIR / "meta.json").write_text(json.dumps({
+_harness.session_meta_path(SESSION_ID).write_text(json.dumps({
     "title": "分支渲染检查",
     "pinned": False,
     "current_branch": "b2",
@@ -78,7 +79,7 @@ SESSION_DIR = FAKE_SESSIONS / SESSION_ID
     "output_rules": "测试规则",
 }, ensure_ascii=False), encoding="utf-8")
 for branch, answer in (("main", "main 的回答"), ("b2", "b2 的回答"), ("b3", "b3 的回答")):
-    (SESSION_DIR / "branches" / f"{branch}.json").write_text(
+    _harness.session_branch_path(SESSION_ID, branch).write_text(
         json.dumps({"message": [{"role": "user", "content": "问题"},
                                 {"role": "assistant", "content": answer}]}, ensure_ascii=False),
         encoding="utf-8")
@@ -165,7 +166,7 @@ check("没有在编辑态时不渲染编辑框", "编辑这条消息" not in [t.
 # 清理隔离目录（真实 sessions/ 不会被触碰）
 for _f in list(FAKE_SESSIONS.glob("*.json")) + list(FAKE_SESSIONS.glob("*.tmp*")):
     _f.unlink()
-for _d in list(FAKE_SESSIONS.iterdir()):
+for _d in list(_harness.sessions_root().iterdir()):
     if _d.is_dir() and _d.name != "drafts":
         shutil.rmtree(_d, ignore_errors=True)
 

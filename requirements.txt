@@ -11,3 +11,5 @@ Pillow>=10
 # 用户登录（用户名/密码 + 签名 cookie 记住登录状态）
 # 注意：它自己是 streamlit 的插件式依赖，不替代 streamlit
 streamlit-authenticator>=0.4,<0.5
+# 线上存档后端（本地开发/测试用文件系统，不需要它）
+pymongo>=4.6

@@ -52,6 +52,67 @@ def ui_source() -> str:
     return (APP_PACKAGE / "ui.py").read_text(encoding="utf-8")
 
 
+# --------------------------------------------------------------------------- #
+# 存档的真实路径
+#
+# 存档现在按用户分区（users/<用户名>/sessions/...），用户名由 storage 决定，
+# 测试里的当前用户是 "local"。测试要断言"磁盘上真的有这个文件"时，用下面的
+# archive_path() 把存储键名换成真实路径，而不是自己去拼目录结构。
+# --------------------------------------------------------------------------- #
+LOCAL_UID = "local"
+
+
+def archive_path(rel: str) -> Path:
+    """存储键名 → 隔离存档目录下的真实路径。
+
+    rel 可以是完整键名（"sessions/<会话ID>/meta.json"），也可以只给会话 ID。
+    以 "sessions" 结尾的输入按"整个 sessions 根"处理（不会重复拼一层）。
+    """
+    text = str(rel).replace("\\", "/").strip("/")
+    if text == "sessions":
+        text = ""
+    elif text and not text.startswith("sessions/"):
+        text = f"sessions/{text}"
+    base = SESSIONS_DIR / "users" / LOCAL_UID
+    return base / text if text else base / "sessions"
+
+
+def session_meta_path(session_id: str) -> Path:
+    return archive_path(f"sessions/{session_id}/meta.json")
+
+
+def session_branch_path(session_id: str, branch_id: str = "main") -> Path:
+    return archive_path(f"sessions/{session_id}/branches/{branch_id}.json")
+
+
+def session_dir(session_id: str) -> Path:
+    return archive_path(f"sessions/{session_id}")
+
+
+def drafts_dir() -> Path:
+    return archive_path("sessions/drafts")
+
+
+def legacy_flat_path(session_id: str) -> Path:
+    """旧扁平存档（sessions/<会话ID>.json）的路径。"""
+    return archive_path(f"sessions/{session_id}.json")
+
+
+def user_root() -> Path:
+    """当前（local）用户的存档根目录。"""
+    return SESSIONS_DIR / "users" / LOCAL_UID
+
+
+def sessions_root() -> Path:
+    """当前（local）用户的 sessions 目录。"""
+    return user_root() / "sessions"
+
+
+def seed_user_root() -> None:
+    """建好用户的存档根目录，供需要在 App 运行前写文件的测试用。"""
+    user_root().mkdir(parents=True, exist_ok=True)
+
+
 def real_png(pixel=(255, 0, 0)) -> bytes:
     """生成一张 1×1 的真实合法 PNG。
 
@@ -135,8 +196,8 @@ def reset_tmp() -> None:
     stale = [p.name for p in SESSIONS_DIR.iterdir()]
     if stale:
         sys.exit(f"测试存档目录不干净（{SESSIONS_DIR}）：{stale}")
-    # 草稿目录每次清空，避免上一个套件的草稿影响本次断言
-    shutil.rmtree(SESSIONS_DIR / "drafts", ignore_errors=True)
+    # 建好"local"用户的根目录：存档按用户分区放在 users/<用户名>/ 下
+    (SESSIONS_DIR / "users" / LOCAL_UID / "sessions").mkdir(parents=True, exist_ok=True)
     # 护栏：绝不允许测试去动真实的 sessions/（曾经因为测试指向它而误删用户存档）
     real_sessions = (PROJECT / "sessions").resolve()
     if SESSIONS_DIR.resolve() == real_sessions or real_sessions in SESSIONS_DIR.resolve().parents:
