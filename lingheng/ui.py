@@ -113,7 +113,7 @@ def main() -> None:
     # （磁盘上的数据本来就按用户隔离，这里只是不让内存里的旧会话"接着显示"）
     if st.session_state.get("_uid") not in (None, uid):
         for _key in ("current_session", "session_title", "current_branch",
-                     "_message_branch", "message", "pending_regen", "editing_index"):
+                     sessions.OWNER_STATE, "message", "pending_regen", "editing_index"):
             st.session_state.pop(_key, None)
     st.session_state["_uid"] = uid
 
@@ -130,8 +130,10 @@ def main() -> None:
         st.session_state.setdefault(_key, None)
     # 当前所在分支（一条分支 = 一条线性消息列表；切换分支就是整体换掉 message）
     st.session_state.setdefault("current_branch", "main")
-    # 内存里的 message 属于哪条分支（渲染时据此判断要不要从磁盘重载）
-    st.session_state.setdefault("_message_branch", st.session_state.current_branch)
+    # 内存里的 message 属于哪个会话的哪条分支（渲染时据此判断要不要从磁盘重载）
+    st.session_state.setdefault(sessions.OWNER_STATE,
+                                sessions.message_owner(st.session_state.get("current_session"),
+                                                       st.session_state.current_branch))
     # 「重新生成」标记：按钮回调里只做标记，流式请求交给页面主体
     st.session_state.setdefault("pending_regen", False)
     # 正在就地编辑第几条消息（None = 没有在编辑）
@@ -282,12 +284,15 @@ def main() -> None:
             meta = sessions.load_session_meta(sid)
             disk_branch = meta.get("current_branch") or "main"
             st.session_state.current_branch = disk_branch
-            # 以磁盘为准：如果内存里的消息还是另一条分支的，就把当前分支的消息读回来。
-            # 这样"点击切换分支"只依赖回调写盘，不依赖回调改内存状态
-            # （AppTest 等场景下，控件回调结束后内存状态可能被回滚到点击之前）。
-            if st.session_state.get("_message_branch") != disk_branch:
+            # 以磁盘为准：内存里的消息如果不是"这个会话的这条分支"，就重新读回来。
+            # 归属标记必须同时带**会话 ID**——只比分支名的话，两个会话的分支都叫 main，
+            # 切会话时会被误判成"已经加载过"，主区域就会继续显示上一个会话的内容
+            # （表现：点历史会话→按钮变红，但对话内容没变）。
+            # 这样"切会话/切分支"只依赖回调写盘，不依赖回调改内存状态。
+            owner = sessions.message_owner(sid, disk_branch)
+            if st.session_state.get(sessions.OWNER_STATE) != owner:
                 st.session_state.message = sessions.read_branch(sid, disk_branch).get("message", [])
-                st.session_state._message_branch = disk_branch
+                sessions.mark_message_owner(sid, disk_branch)
             current_branch = disk_branch
             branch_list = sessions.branch_ids(sid)
             with st.expander(f"分支（{len(branch_list)}）", expanded=False, key="branch_expander"):

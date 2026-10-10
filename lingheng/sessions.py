@@ -31,6 +31,30 @@ def _legacy_key(session_name: str) -> str:
     return f"{store.SESSIONS_ROOT}/{Path(session_name).name}.json"
 
 
+# --------------------------------------------------------------------------- #
+# 内存消息的归属标记
+#
+# 必须同时包含**会话 ID 与分支 ID**：只比分支名是不够的——每个会话的分支都叫
+# main，切会话时会被误判成"已经加载过"，于是主区域继续显示上一个会话的内容
+# （表现为"点了历史会话、按钮变红但对话内容没变"）。
+# --------------------------------------------------------------------------- #
+OWNER_STATE = "_message_owner"
+
+
+def message_owner(session_name: str = None, branch_id: str = None) -> str:
+    """内存里的 message 属于哪个会话的哪条分支。"""
+    sid = session_name if session_name is not None else st.session_state.get("current_session")
+    bid = branch_id if branch_id is not None else st.session_state.get("current_branch")
+    return f"{sid or ''}::{bid or 'main'}"
+
+
+def mark_message_owner(session_name: str = None, branch_id: str = None) -> str:
+    """记下当前内存消息的归属，返回这个标记。"""
+    owner = message_owner(session_name, branch_id)
+    st.session_state[OWNER_STATE] = owner
+    return owner
+
+
 def session_dir_exists(session_name: str) -> bool:
     """会话是否已经以新结构（目录 + meta.json）存过盘。"""
     try:
@@ -440,8 +464,8 @@ def load_selected_session(session_name: str) -> None:
         st.session_state.session_title = (restore.get("title") or "").strip() or session_name
         st.session_state.session_pinned = bool(restore.get("pinned"))
         st.session_state.current_branch = meta.get("current_branch") or "main"
-        # 标记"内存里的消息属于哪条分支"，渲染时据此判断要不要从磁盘重载
-        st.session_state._message_branch = st.session_state.current_branch
+        # 记下"这批消息属于这个会话的这条分支"
+        mark_message_owner(session_name, st.session_state.current_branch)
         st.session_state.current_session = session_name
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")

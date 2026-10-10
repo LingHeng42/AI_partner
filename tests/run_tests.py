@@ -16,7 +16,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 SUITES = ("test_logic.py", "test_smoke.py", "test_row_render.py", "test_branch_ui.py",
           "test_avatar_ui.py", "test_rerun_render.py", "test_auth_ui.py",
           "test_user_isolation.py", "test_mongo_ui.py",
-          "test_secrets_format.py")
+          "test_secrets_format.py", "test_session_switch.py")
 
 failures = []
 for suite in SUITES:

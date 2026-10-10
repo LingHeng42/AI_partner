@@ -665,8 +665,13 @@ check("重新进入会话时读取的是存档里标注的当前分支",
       app.st.session_state["current_branch"] == target, app.st.session_state["current_branch"])
 check("重新进入会话时载入该分支的消息",
       app.st.session_state["message"] == msgs_of(bsid, target), app.st.session_state["message"])
-check("重新进入会话时标记消息所属分支",
-      app.st.session_state["_message_branch"] == target, app.st.session_state.get("_message_branch"))
+check("重新进入会话时标记消息归属（会话+分支）",
+      app.st.session_state["_message_owner"] == f"{bsid}::{target}",
+      app.st.session_state.get("_message_owner"))
+# 归属标记必须带会话 ID：只比分支名会让"两个会话都叫 main"时切不过去
+check("归属标记能区分不同会话的同名分支",
+      app.message_owner("另一会话", "main") != app.message_owner(bsid, "main"),
+      (app.message_owner("另一会话", "main"), app.message_owner(bsid, "main")))
 
 # 清理掉这个测试会话，避免影响后面按会话列表排序的断言
 app.delete_session(bsid)

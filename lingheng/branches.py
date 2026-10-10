@@ -114,7 +114,7 @@ def rename_branch(session_name: str, branch_id: str, new_id: str = None, input_k
         sessions.write_session_meta(session_name, meta)
         if st.session_state.get("current_branch") == branch_id and session_name == st.session_state.get("current_session"):
             st.session_state.current_branch = new_id
-            st.session_state._message_branch = new_id
+            sessions.mark_message_owner(session_name, new_id)
     except Exception as e:  # noqa: BLE001
         st.error(f"分支改名失败: {e}")
 

@@ -316,7 +316,7 @@ def regenerate(index: int) -> None:
                             fork_index=index)
     st.session_state.current_branch = branch_id
     st.session_state.message = [dict(m) for m in prefix]
-    st.session_state._message_branch = branch_id
+    sessions.mark_message_owner(st.session_state.get("current_session"), branch_id)
     st.session_state.pending_regen = True
 
 
@@ -354,7 +354,7 @@ def submit_edit(index: int, input_key: str) -> None:
                             fork_index=index)
     st.session_state.current_branch = branch_id
     st.session_state.message = [*[dict(m) for m in prefix], dict(seed)]
-    st.session_state._message_branch = branch_id
+    sessions.mark_message_owner(st.session_state.get("current_session"), branch_id)
     st.session_state.editing_index = None
     # 改的是用户消息 → 需要模型接着回答；改的是 AI 回复 → 他自己写了内容，不再生成
     st.session_state.pending_regen = seed.get("role") == "user"
