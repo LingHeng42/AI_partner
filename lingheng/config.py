@@ -103,6 +103,60 @@ DEFAULT_ADVANCED = {
 }
 ADVANCED_KEYS = tuple(DEFAULT_ADVANCED)
 
+
+# --------------------------------------------------------------------------- #
+# 密钥与权限（服务器侧配置，绝不发给浏览器）
+#
+# 线上用 Streamlit secrets，本地开发用环境变量 / .env 兜底。
+# 权限一律 **fail-closed**：读不到配置 = 谁都不能用站长的 key。
+# --------------------------------------------------------------------------- #
+def _secret(name: str):
+    """读一个 secret；没配 secrets 或键不存在时返回 None，绝不抛错。"""
+    try:
+        import streamlit as st
+
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:  # noqa: BLE001 - 没配 secrets / 不在脚本上下文里
+        return None
+    return None
+
+
+def owner_api_key() -> str:
+    """站长的 DeepSeek Key。
+
+    优先用运行时覆盖值（测试用 app.OWNER_API_KEY = "..."），其次 secrets，
+    最后环境变量（本地开发）。
+    """
+    override = _overridden("OWNER_API_KEY", None)
+    if override is not None:
+        return str(override).strip()
+    value = _secret("DEEPSEEK_API_KEY")
+    if value is None:
+        value = os.environ.get("DEEPSEEK_API_KEY")
+    return (str(value) if value else "").strip()
+
+
+def allowed_users() -> list:
+    """允许使用站长 key 的用户名名单（大小写不敏感）。
+
+    顺带兼容 ALLOWED_EMAILS：万一以后换成邮箱标识，不用改别的地方。
+    空名单 / 读不到配置 → 返回空列表，也就是"谁都不能用站长的 key"。
+    """
+    override = _overridden("ALLOWED_USERS", None)
+    if override is not None:
+        raw = list(override)
+    else:
+        raw = []
+        for name in ("ALLOWED_USERS", "ALLOWED_EMAILS"):
+            value = _secret(name)
+            if value is None:
+                value = os.environ.get(name)
+            if value:
+                raw.extend(value)
+    return [str(item).strip().lower() for item in raw if str(item).strip()]
+
+
 def load_dotenv_file(path: Path = BASE_DIR / ".env") -> None:
     """极简 .env 读取：KEY=VALUE 逐行，已存在的环境变量优先。"""
     if not path.exists():

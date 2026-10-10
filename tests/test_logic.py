@@ -239,6 +239,13 @@ fake_st.chat_input = _state_writing("chat_input")
 fake_st.toggle = _state_writing("toggle")
 fake_st.text_input = _state_writing("text_input")
 fake_st.text_area = _state_writing("text_area")
+# 表单：st.form 是上下文管理器；提交按钮默认"没点"
+fake_st.form = lambda *a, **k: _Sink()
+fake_st.form_submit_button = lambda *a, **k: False
+# 按钮默认"没点"（返回 False）。返回真值会让 `点了 and 输入框取值` 去对 None 调方法，
+# 在真实 Streamlit 里按钮没点就是 False，这里保持一致。
+fake_st.button = lambda *a, **k: False
+fake_st.toggle = lambda *a, **k: False
 
 fake_openai = types.ModuleType("openai")
 
@@ -257,7 +264,11 @@ import AI_partner as app  # noqa: E402
 
 check("import 成功（假 streamlit/openai）", True)
 check("客户端使用 DeepSeek base_url", app.client.init_kwargs["base_url"] == "https://api.deepseek.com")
-check("客户端 key 取自 DEEPSEEK_API_KEY", app.client.init_kwargs["api_key"] == os.environ["DEEPSEEK_API_KEY"])
+# 注：app.client 是**导入时**用当时的环境变量构造的，后面这段测试会把
+# DEEPSEEK_API_KEY 临时弹掉，所以这里只断言"确实拿到了一个 key"。
+check("导入时用上了环境变量里的 key",
+      str(app.client.init_kwargs.get("api_key", "")).startswith("sk-"),
+      {k: (str(v)[:8] + "...") for k, v in app.client.init_kwargs.items()})
 
 # --------------------------------------------------------------------------- #
 # API Key 读取：.env 回退 + 缺失时的提示分支
@@ -282,13 +293,54 @@ app.load_dotenv_file(TMP_DIR / "not_exists.env")
 check("缺少 .env 文件时不报错", True)
 
 saved_key = os.environ.pop("DEEPSEEK_API_KEY", None)
-app.st.stop = _Recorder("stop")
-app.require_api_key()
-check("缺少 Key 时调用 st.stop 中止", app.st.stop.calls != [])
-check("缺少 Key 时给出 st.error", errors.calls and "DEEPSEEK_API_KEY" in errors.calls[-1], errors.calls[-1:])
+
+# --------------------------------------------------------------------------- #
+# 用谁的 key：用户自带优先；站长 key 只在"名单命中"或"本地未配登录"时可用
+# --------------------------------------------------------------------------- #
+app.AUTH_ENABLED = False            # 本地开发模式（没配登录）
+app.ALLOWED_USERS = []
+app.OWNER_API_KEY = ""
+app.st.session_state["user_api_key"] = ""
+key, source = app.ai.resolve_api_key("alice")
+check("没有任何 key 可用时返回 none", (key, source) == ("", "none"), (key, source))
+check("没 key 时提示引导用户填自己的", "API Key" in app.ai.api_key_error_message())
+
+app.OWNER_API_KEY = "sk-owner"
+key, source = app.ai.resolve_api_key("alice")
+check("本地开发模式（没配登录）允许用站长 key", (key, source) == ("sk-owner", "owner"), (key, source))
+
+# 线上：配了登录之后，名单就是唯一的权限依据
+app.AUTH_ENABLED = True
+key, source = app.ai.resolve_api_key("alice")
+check("已配登录且名单为空时无 key 可用（fail-closed）", (key, source) == ("", "none"), (key, source))
+
+app.ALLOWED_USERS = ["alice", "Bob"]
+key, source = app.ai.resolve_api_key("alice")
+check("名单命中时用站长的 key", (key, source) == ("sk-owner", "owner"), (key, source))
+check("名单匹配大小写不敏感", app.ai.resolve_api_key("BOB")[1] == "owner")
+check("未登录（空用户名）不给用站长 key", app.ai.resolve_api_key("")[1] == "none")
+check("不在名单里的用户只能用自己的 key", app.ai.resolve_api_key("carol")[1] == "none")
+
+app.st.session_state["user_api_key"] = "sk-mine"
+key, source = app.ai.resolve_api_key("alice")
+check("自己填了 key 时优先用自己的（即使在名单里）",
+      (key, source) == ("sk-mine", "user"), (key, source))
+
+app.ALLOWED_USERS = []
+key, source = app.ai.resolve_api_key("carol")
+check("名单清空后老用户也不能用站长 key（权限可随时收回）",
+      (key, source) == ("sk-mine", "user"), (key, source))
+
+# 用户自己的 key 不能出现在磁盘/存档里（tmp 在这段之后才定义，所以看整个临时目录）
+_leaked = [str(p) for p in TMP_DIR.rglob("*")
+           if p.is_file() and "sk-mine" in p.read_text(encoding="utf-8", errors="ignore")]
+check("用户填的 key 不会写进任何文件", not _leaked, _leaked)
+
+app.st.session_state["user_api_key"] = ""
+app.ALLOWED_USERS = []
+app.OWNER_API_KEY = ""
 os.environ["DEEPSEEK_API_KEY"] = saved_key
 app.st.stop = _Sink()
-check("Key 正常时原样返回", app.require_api_key() == saved_key)
 
 # --------------------------------------------------------------------------- #
 # 会话存档

@@ -102,7 +102,15 @@ check("首次加载渲染了页面", len(first) > 5, f"{len(first)} 个 st 调�
 
 second = run_entry()
 check("第二次重跑仍然渲染页面（不再是白屏）", len(second) > 5, f"{len(second)} 个 st 调用")
-check("两次渲染的元素数量一致", len(first) == len(second), f"{len(first)} vs {len(second)}")
+
+# 真正的不变量是"页面骨架每次都在"，而不是"元素数完全相等"：
+# 侧边栏的 Key 状态区会随会话状态变化（用自己的 key / 用站长的 key 渲染不同），
+# 所以数量比较是错的判据——只要骨架还在，就不是白屏。
+SKELETON = ("set_page_config", "header", "divider", "subheader", "expander",
+            "text_input", "text_area", "slider", "toggle", "file_uploader")
+for name in SKELETON:
+    check(f"第一次渲染有骨架 {name}", name in first)
+    check(f"第二次重跑仍有骨架 {name}", name in second)
 
 # 关键：页面主体不能留在模块顶层（否则 import 缓存会吃掉它）
 ui_source = (_harness.APP_PACKAGE / "ui.py").read_text(encoding="utf-8")

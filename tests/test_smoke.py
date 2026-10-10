@@ -86,6 +86,9 @@ _app.__dict__["_FAKE_OPENAI_STATE"] = STATE
 wrapper = write_wrapper(
     "_app_wrapper.py",
     "os.environ['DEEPSEEK_API_KEY'] = 'sk-test-not-used'\n"
+    # 预置用户自己的 key：跳过"配置 API Key"这道门，直接渲染聊天界面
+    "import streamlit as st\n"
+    "st.session_state['user_api_key'] = 'sk-test-user-key'\n"
     "import _fake_openai_smoke\n"
     "import AI_partner\n",
 )

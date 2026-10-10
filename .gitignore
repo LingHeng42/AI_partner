@@ -28,3 +28,6 @@ tests/.tmp/
 
 # 存档只应放在项目根的 sessions/：包内这个目录是拆包时 BASE_DIR 算错留下的，防止再出现
 lingheng/sessions/
+
+# 本地 secrets（含 key 与用户表，绝不入库）
+.streamlit/secrets.toml

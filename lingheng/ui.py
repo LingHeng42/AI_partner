@@ -7,11 +7,11 @@ import 有缓存，第二次重跑时顶层代码不会再执行，页面就白�
 
 import streamlit as st
 
-from . import ai, branches, config, images, profile, sessions, store
+from . import ai, auth, branches, config, images, profile, sessions, store
 
 
-def main() -> None:
-    # 页面配置必须是第一个 Streamlit 命令
+def _page_config() -> None:
+    """页面配置。必须是第一个 Streamlit 命令，所以在 main() 里最先调用。"""
     st.set_page_config(
         page_title="凌恒的酒馆",
         page_icon=str(config.LOGO_PATH) if config.LOGO_PATH.exists() else ":material/local_bar:",
@@ -22,6 +22,88 @@ def main() -> None:
             "About": "凌恒的酒馆是一个基于人工智能的聊天平台，旨在为用户提供一个有趣、互动和智能的聊天体验。",
         },
     )
+
+
+def _render_login() -> None:
+    """登录门：没配登录（本地开发）直接放行；配了就要求先登录。"""
+    if not auth.auth_enabled():
+        return
+    st.title("凌恒的酒馆")
+    if not auth.login_form_allowed():
+        st.error(
+            "登录已经开启，但当前环境缺 `streamlit-authenticator` 或凭据配置，"
+            "所以谁都无法登录。请检查 requirements.txt 与 secrets 里的 "
+            "`AUTH_CREDENTIALS` / `COOKIE_KEY`。"
+        )
+        st.stop()
+    auth.do_login()
+    if not auth.current_user():
+        st.caption("请使用站长发给你的账号登录。这个应用不开放自助注册。")
+        st.stop()
+
+
+def _render_api_key_gate() -> None:
+    """Key 门：没有可用 key 就不进入聊天界面，先让用户把它配好。"""
+    key, source = ai.resolve_api_key()
+    if key:
+        return
+    st.title("配置 API Key")
+    allowed = auth.can_use_owner_key()
+    st.info(ai.api_key_error_message(allowed))
+    with st.form("api_key_form", border=False):
+        value = st.text_input(
+            "DeepSeek API Key",
+            type="password",
+            placeholder="sk-...",
+            help="只保存在本次会话的内存里；不会写入服务器、不会进数据库。",
+        )
+        if st.form_submit_button("保存并开始使用", type="primary") and value.strip():
+            st.session_state[ai.USER_KEY_STATE] = value.strip()
+            st.rerun()
+    st.caption("登录状态不会因刷新丢失；但 Key 只记在本次会话里，重开标签页需要重新填写。")
+    st.stop()
+
+
+def _render_api_key_status() -> None:
+    """侧边栏：显示当前在用谁的 Key，并提供切换/清除。"""
+    key, source = ai.resolve_api_key()
+    if source == "none":
+        return
+    if source == "owner":
+        st.success(f"正在使用：**{auth.key_source_label(source)}**")
+    else:
+        st.caption(f"正在使用：{auth.key_source_label(source)}（{key[:6]}…）")
+    if auth.can_use_owner_key() and source == "user":
+        st.caption("你也在站长的允许名单里：清掉自己的 Key 就会改用站长的。")
+        if st.button("改用站长的 Key", width="stretch"):
+            st.session_state[ai.USER_KEY_STATE] = ""
+            st.rerun()
+    elif source == "user":
+        if st.button("清除我填的 Key", width="stretch"):
+            st.session_state[ai.USER_KEY_STATE] = ""
+            st.rerun()
+
+
+def _render_key_input(state_key: str = None) -> None:
+    """侧边栏里让用户填/改自己的 Key（登录后也能随时改）。"""
+    with st.expander("API Key", expanded=not ai.user_api_key()):
+        st.caption("填你自己的 DeepSeek Key。只存在本次会话内存里，不会上传到服务器。")
+        value = st.text_input(
+            "DeepSeek API Key",
+            type="password",
+            value="",
+            placeholder="sk-...（留空则继续用当前可用的 Key）",
+            key=state_key,
+        )
+        if st.button("保存 Key", width="stretch") and value.strip():
+            st.session_state[ai.USER_KEY_STATE] = value.strip()
+            st.rerun()
+
+
+def main() -> None:
+    _page_config()
+    _render_login()          # 第一道门：你是谁（未配置登录时直接放行）
+    _render_api_key_gate()   # 第二道门：用谁的 key
 
     # 会话状态初始化
     for _key, _value in config.DEFAULT_PROFILE.items():
@@ -45,10 +127,10 @@ def main() -> None:
     if "current_session" not in st.session_state:
         st.session_state.current_session = store.new_session_id()
 
-    # 每次脚本运行都校验 Key（函数本身不缓存），缓存只作用在客户端构造上。
     # 客户端存在 ai 模块上（而不是这里的局部变量），这样入口那边也能读到
     # （`app.client` 的读取与替换都照旧可用）。
-    ai.configure_client(ai.get_client(ai.require_api_key()))
+    api_key, _source = ai.resolve_api_key()
+    ai.configure_client(ai.get_client(api_key))
 
     # logo（文件缺失时不影响页面）
     # if LOGO_PATH.exists():
@@ -79,6 +161,15 @@ def main() -> None:
         with title_col:
             st.markdown("### 凌恒的酒馆")
             st.caption("AI 角色扮演聊天")
+
+        # 身份与 Key：让用户随时看清"现在用谁的额度"，并能自己改
+        user = auth.current_user()
+        if user.get("username") and auth.auth_enabled():
+            st.caption(f"已登录：{user.get('name') or user['username']}")
+            if st.button("退出登录", width="stretch", icon=":material/logout:"):
+                auth.do_logout()
+        _render_api_key_status()
+        _render_key_input()
 
         st.divider()
 

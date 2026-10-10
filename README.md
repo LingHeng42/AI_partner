@@ -36,6 +36,60 @@ streamlit run AI_partner.py
 
 启动后浏览器会打开 `http://localhost:8501`。
 
+本地开发**不需要**配置登录：没配 `AUTH_CREDENTIALS` 时应用会直接放行（见下文）。
+
+## 多用户：登录、API Key 与会话归属
+
+这个应用支持多人使用，核心是"**每个人用自己的 Key，只看自己的会话**"。
+
+### 用谁的 Key
+
+按顺序判定（`lingheng/ai.py` 的 `resolve_api_key`）：
+
+| 顺序 | 条件 | 结果 |
+|---|---|---|
+| 1 | 用户自己在侧边栏填了 Key | 用他的（**优先**，即使在允许名单里也先花自己的） |
+| 2 | 用户名在 `ALLOWED_USERS` 里 | 用站长的 Key |
+| 3 | 没配登录（本地开发） | 用站长的 Key（仅此一种放宽，否则本地无法调试） |
+| 4 | 其余（线上已配登录但不在名单里） | 谁的钱都不花，引导去填自己的 Key |
+
+**你的 Key 与允许名单都只放在服务器侧**（`st.secrets`，本地用 `.env` 兜底），浏览器拿不到。
+用户自己填的 Key **只存在于 `st.session_state`（内存）**：不落盘、不进数据库、不进日志，
+所以即使服务器上的存档泄露也不会泄露任何人的 Key。代价是新开标签页要重填一次。
+
+侧边栏会明确显示"正在使用：你自己的 Key / 站长的 Key"，避免有人以为在花自己的钱。
+
+### 登录
+
+用 `streamlit-authenticator` 的用户名/密码方式（不依赖第三方 OAuth 服务）：
+
+- **不开放自助注册**：账号由你在 secrets 里手动维护，加人 = 改 secrets 后重新部署
+- 登录状态用**签名 cookie** 记住，密钥是 `COOKIE_KEY`
+- 身份层单独放在 `lingheng/auth.py`，只对外暴露 `current_user_id()`；
+  以后想换成 `st.login`（Google OIDC）只改这一个文件，上层不用动
+
+配置模板见 [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)，
+密码哈希用 [tests/make_credentials.py](tests/make_credentials.py) 生成：
+
+```bash
+.venv\Scripts\python.exe tests\make_credentials.py owner:你的密码 friend1:朋友1的密码
+```
+
+### 权限是 fail-closed 的
+
+`ALLOWED_USERS` **留空或写错 = 谁都不能用你的 Key**（而不是谁都能用）。
+宁可大家各自填 Key，也不要出现"配置一出问题就全员花站长钱"。收回权限同理：从名单里删掉即可。
+
+### 部署到 Community Cloud 的注意事项
+
+1. **容器本地文件随时会被重置**（休眠、改设置、push 代码、平台维护都会触发），
+   所以 `sessions/` 里的存档在线上**不可持久**。多人使用时建议把会话存到外部数据库
+   （MongoDB Atlas 免费层等），不要依赖本地文件。
+2. `DEEPSEEK_API_KEY`、`ALLOWED_USERS`、`COOKIE_KEY`、`AUTH_CREDENTIALS` 都配在
+   App 的 **Settings → Secrets**，不要写进仓库。
+3. **仓库私有 ≠ 应用私有**：应用可见性由 App 设置决定，与仓库无关。
+   因为 `streamlit-authenticator` 不开放自助注册，拿到链接的陌生人没有账号密码也进不来。
+
 ## 项目结构
 
 ```

@@ -1,17 +1,19 @@
 """模型调用与对话流程：客户端、上下文拼装、流式生成、重新生成、编辑消息。"""
 
 import json
-import os
 import sys
 
 import streamlit as st
 from openai import OpenAI
 
-from . import branches, config, images, profile, sessions, store
+from . import auth, branches, config, images, profile, sessions, store
 
 # 当前使用的模型客户端。由 ui.main() 每次重跑时通过 configure_client() 设置；
 # 测试可以直接替换它（或替换入口模块上的 client，见 _client()）。
 client = None
+
+# 用户自己填的 DeepSeek Key 存在这里（**只在内存里**，不落盘、不进数据库、不进日志）。
+USER_KEY_STATE = "user_api_key"
 
 
 def configure_client(new_client) -> None:
@@ -34,23 +36,59 @@ def _client():
     return client
 
 
+def user_api_key() -> str:
+    """用户在当前会话里填的 key（只存在 session_state，浏览器刷新即丢弃）。"""
+    return str(st.session_state.get(USER_KEY_STATE) or "").strip()
 
-def require_api_key() -> str:
-    """每次脚本运行都校验一次 API Key，缺失就停在这一步并给出可操作的提示。"""
-    config.load_dotenv_file()
-    api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    if not api_key:
-        st.error(
-            "未读取到环境变量 `DEEPSEEK_API_KEY`，无法调用 DeepSeek 接口。\n\n"
-            "请在系统环境变量或项目根目录的 `.env` 中配置后重启应用。"
+
+def resolve_api_key(username: str = None) -> tuple:
+    """决定这次调用用谁的 key。
+
+    返回 ``(key, source)``，source 取 "user" / "owner" / "none"：
+
+    1. 用户自己填了 → 用他的（**优先**：即使被授权用站长 key，也先花自己的）
+    2. 在允许名单里 → 用站长的
+    3. 没配登录（本地开发）→ 用站长的（**仅此一种放宽**）
+    4. 其余（线上已配登录但不在名单里）→ "none"，谁的钱都不花
+
+    第 3 条是必要的：本地没配登录时用户名是 "local"，永远不在名单里，
+    如果这里也 fail-closed，本地开发就拿不到 key。线上配了登录就一定走第 2/4 条，
+    所以"名单写错导致全员花站长钱"不会发生。
+    """
+    config.load_dotenv_file()  # 本地开发时把 .env 读进环境变量
+    own = user_api_key()
+    if own:
+        return own, "user"
+    name = str(username if username is not None else auth.current_user_id()).strip()
+    if not auth.auth_enabled() or auth.can_use_owner_key(name):
+        owner = config.owner_api_key()
+        if owner:
+            return owner, "owner"
+    return "", "none"
+
+
+def api_key_error_message(station_owner_allowed: bool = False) -> str:
+    """没 key 可用时给用户看的提示（说清怎么解决，而不是只报错）。"""
+    if station_owner_allowed:
+        return (
+            "**没有可用的 API Key。** 请在侧边栏「API Key」里填入你自己的 DeepSeek Key，"
+            "或者联系站长把你加进允许名单。"
         )
-        st.stop()
-    return api_key
+    return (
+        "**还没有配置 API Key。** 请在侧边栏「API Key」里填入你自己的 DeepSeek Key"
+        "（只保存在本次会话的内存里，不会写到服务器上）。"
+    )
 
 
-@st.cache_resource(show_spinner=False)
 def get_client(api_key: str) -> OpenAI:
+    """按 key 构造客户端。
+
+    **故意不加 st.cache_resource**：那个缓存是全局的，会把每个用户的 key 留在
+    服务器内存里（用户撤销 key 后还可能残留）。OpenAI 客户端本身很轻，每次重跑
+    新建一个的代价可以忽略。
+    """
     return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
 
 def trim_context(messages: list) -> list:
     """从最新消息往前取，同时受条数与字符数限制（system prompt 不在此列表内）。"""

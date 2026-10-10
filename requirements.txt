@@ -8,3 +8,6 @@ streamlit>=1.49,<2
 openai>=1.40
 # 校验上传的头像确实是能解码的图片（坏图会让 st.chat_message 直接报错）
 Pillow>=10
+# 用户登录（用户名/密码 + 签名 cookie 记住登录状态）
+# 注意：它自己是 streamlit 的插件式依赖，不替代 streamlit
+streamlit-authenticator>=0.4,<0.5
