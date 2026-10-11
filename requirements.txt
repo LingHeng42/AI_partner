@@ -1,10 +1,18 @@
 # 凌恒的酒馆 依赖
 # 安装： python -m pip install -r requirements.txt
 #
-# 版本下限说明：
-#   streamlit >= 1.49 才能使用 st.button(width=...) 与 st.logo(size=...)
-#   openai    >= 1.40 才支持 reasoning_effort 参数与 chat.completions 流式接口
-streamlit>=1.49,<2
+# 为什么把 streamlit 锁到一个具体版本（而不是 >= 范围）：
+#   这个应用用了一批较新的 Streamlit API 参数，例如
+#     st.chat_input(submit_mode=...)、st.expander(type=/icon=)、
+#     st.button(width=/icon=)、st.popover(type=/key=)、
+#     st.columns(vertical_alignment=)、st.chat_message(avatar=)
+#   它们在不同版本里增删/改名（旧版用 use_container_width，新版改 width）。
+#   一旦线上解析到别的版本，就可能直接 TypeError，而**本地用另一个版本验证不出来**。
+#   线上曾因此反复出现"本地好好的、线上白屏"，所以这里锁死到本地实测通过的版本。
+#   改动这个版本号时，必须先在本地把 tests/run_tests.py 全跑一遍。
+streamlit==1.65.0
+
+# 模型接口：需要 reasoning_effort 参数与 chat.completions 流式接口
 openai>=1.40
 # 校验上传的头像确实是能解码的图片（坏图会让 st.chat_message 直接报错）
 Pillow>=10
