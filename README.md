@@ -119,6 +119,35 @@ users/<用户名>/sessions/drafts/<会话ID>.draft            还没产生对话
 对应的防回归测试是 [tests/test_user_isolation.py](tests/test_user_isolation.py)：
 **两种后端各跑一遍**"看不到、读不到、也删不掉别人的会话"，外加路径穿越检查。
 
+### 排查"历史记录不见了"
+
+线上历史不见，几乎总是"**没在用 MongoDB**"。侧边栏的 **「存储」** 面板会直接告诉你
+当前用的是哪种存储、连接串（密码已遮掉）、以及连不上的原因；服务端日志里搜
+`[storage]` 也能看到。
+
+| 侧边栏「存储」显示 | 含义 | 怎么修 |
+|---|---|---|
+| 提示"存在容器本地文件里" | `MONGO_URI` 没读到 | 检查 Secrets 里有没有 `MONGO_URI`；**整个 secrets 文件解析失败时所有键都读不到**（见上面 TOML 格式的告警） |
+| 显示 MongoDB 但报"连不上" | 连接被拒 | 看报错里的原因，最常见是 Atlas 的 Network Access 白名单 |
+| 显示 MongoDB、文档数为 0 | 连上了但没数据 | 之前的数据写在别处（老的本地文件里），或写入时用的用户名与现在不同 |
+
+**Atlas 必做的一步**：`Network Access` 里加 `0.0.0.0/0`（"Allow access from anywhere"）。
+Streamlit Community Cloud 的出口 IP **不固定且官方不公布**，只放行你自己的 IP 会导致
+"本机 ping 得通、线上连不上" —— 这是最容易踩的坑。
+
+本机自检（分步告诉你卡在哪）：
+
+```bash
+# 直接给连接串（只在内存里用，不写文件）
+.venv\Scripts\python.exe tests\check_mongo.py "mongodb+srv://用户:密码@集群.mongodb.net/?appName=x"
+
+# 或者读本地 .streamlit/secrets.toml 里的 MONGO_URI
+.venv\Scripts\python.exe tests\check_mongo.py
+```
+
+> 本机 `pymongo` ping 成功**只证明你这台电脑连得上**，不能证明 Cloud 连得上。
+> 判断"线上有没有在用数据库"，以上面那张表的第一列为准。
+
 ### 部署到 Community Cloud 的注意事项
 
 1. `DEEPSEEK_API_KEY`、`ALLOWED_USERS`、`COOKIE_KEY`、`AUTH_CREDENTIALS`、`MONGO_URI`

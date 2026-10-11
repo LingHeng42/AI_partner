@@ -26,6 +26,7 @@ Mongo 后端把每个文件存成一个文档（``key`` = 相对路径，``data`
 import json
 import os
 import shutil
+import sys
 import threading
 from pathlib import Path
 
@@ -204,24 +205,75 @@ class MongoBackend:
 # --------------------------------------------------------------------------- #
 def mongo_uri() -> str:
     """连接串：优先运行时覆盖（测试用），其次 secrets，最后环境变量。"""
+    return _mongo_lookup()[0]
+
+
+def _mongo_lookup():
+    """返回 ``(连接串, 来源, 读配置时的报错)``。
+
+    为什么要连"来源"和"报错"一起返回：线上最常见的问题是 **secrets 读不到**
+    （比如 TOML 语法不合法、键名写错、忘了填 MONGO_URI），这时应用会静默退回
+    本地文件模式 —— 而 Community Cloud 的本地文件每次重启都会被清空，
+    表现就是"历史记录都不见了"，却完全看不出原因。
+    """
     import sys
 
     entry = sys.modules.get("AI_partner")
     override = getattr(entry, "MONGO_URI", None) if entry is not None else None
     if override is not None:
-        return str(override).strip()
+        return str(override).strip(), "运行时覆盖", ""
     try:
         import streamlit as st
 
         if MONGO_ENV_VAR in st.secrets:
-            return str(st.secrets[MONGO_ENV_VAR]).strip()
-    except Exception:  # noqa: BLE001 - 没配 secrets
-        pass
-    return (os.environ.get(MONGO_ENV_VAR) or "").strip()
+            return str(st.secrets[MONGO_ENV_VAR]).strip(), "secrets", ""
+        secrets_error = f"secrets 里没有 `{MONGO_ENV_VAR}`"
+    except Exception as exc:  # noqa: BLE001 - secrets 缺失/解析失败都走这里
+        secrets_error = f"读 secrets 失败（{type(exc).__name__}: {str(exc)[:120]}）"
+    value = (os.environ.get(MONGO_ENV_VAR) or "").strip()
+    if value:
+        return value, "环境变量", secrets_error
+    return "", "", secrets_error
+
+
+def mask_uri(uri: str) -> str:
+    """把连接串里的密码遮掉，方便安全地显示/贴日志。"""
+    import re as _re
+
+    if not uri:
+        return ""
+    return _re.sub(r"://([^:/@]+):([^@/]+)@", r"://\1:***@", uri)
 
 
 def using_mongo() -> bool:
     return bool(mongo_uri())
+
+
+def status() -> dict:
+    """当前存储状态（给界面显示与排查用）。
+
+    返回 ``mode`` / ``uri`` / ``uri_source`` / ``secrets_error`` / ``ok`` / ``error``
+    / ``documents``。``ok`` 为 False 时 ``error`` 里是连不上的原因。
+    """
+    uri, source, secrets_error = _mongo_lookup()
+    info = {
+        "mode": MONGO_BACKEND if uri else LOCAL_BACKEND,
+        "uri": mask_uri(uri),
+        "uri_source": source,
+        "secrets_error": secrets_error,
+        "ok": True,
+        "error": "",
+        "documents": None,
+    }
+    if not uri:
+        return info
+    try:
+        collection = _client()[MONGO_DB_NAME][MONGO_COLLECTION]
+        info["documents"] = collection.count_documents({"uid": current_uid()})
+    except Exception as exc:  # noqa: BLE001 - 连不上要把原因显示出来，而不是静默降级
+        info["ok"] = False
+        info["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    return info
 
 
 def _client():
@@ -244,9 +296,34 @@ def active():
     """当前生效的后端。
 
     配了连接串就用 MongoDB（线上），否则用文件系统（本地开发 / 测试）。
+
+    **配了却连不上时直接报错，不退回本地文件**：Community Cloud 的本地文件每次
+    重启都会被清空，静默降级会把数据写进一个注定会丢的地方 —— 用户只会看到
+    "历史记录不见了"，完全查不出原因。宁可明确报错。
     """
     if using_mongo():
-        return MongoBackend(_client(), current_uid())
+        try:
+            backend = MongoBackend(_client(), current_uid())
+            # 构造后端时就会建索引，连不上会在这里抛；再 ping 一次确认真的通
+            backend.collection.database.client.admin.command("ping")
+            _state.mongo_error = None
+            return backend
+        except Exception as exc:  # noqa: BLE001
+            message = (
+                f"MongoDB 连接失败（{type(exc).__name__}: {str(exc)[:180]}）。\n\n"
+                "会话**不会**写进本地文件——那在 Streamlit Cloud 上随时会被重置，写了也会丢。"
+                "请依次检查：\n"
+                "① Atlas → Network Access 是否允许 `0.0.0.0/0`"
+                "（Streamlit Cloud 的出口 IP 不固定，只放行你自己的 IP 会导致线上连不上）；\n"
+                "② App 的 Secrets 里是否有 `MONGO_URI`（注意 TOML 语法，写错会导致整个 "
+                "secrets 文件读不到）；\n"
+                "③ 用户名/密码是否正确，密码里的 `@ : / ?` 等字符要做 URL 编码；\n"
+                "④ 集群是否已暂停/删除。"
+            )
+            if getattr(_state, "mongo_error", None) != message:
+                _state.mongo_error = message
+                print(f"[storage] {message}", file=sys.stderr, flush=True)
+            raise RuntimeError(message) from exc
     return LocalBackend(config.archive_dir())
 
 

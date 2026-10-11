@@ -84,6 +84,35 @@ def _render_api_key_status() -> None:
             st.rerun()
 
 
+def _render_storage_status(username: str = None) -> None:
+    """侧边栏：显示会话存在哪（本地文件 / MongoDB），并在连不上时明确报错。
+
+    为什么必须显式显示：配了 MONGO_URI 但连不上、或忘了配时，应用会退回本地文件，
+    而 Community Cloud 的本地文件随时会被重置 —— 用户只会看到"历史记录不见了"，
+    完全查不出原因。这里把它变成一眼可见的信息。
+    """
+    info = storage.status()
+    with st.expander("存储", expanded=not info["ok"], icon=":material/database:"):
+        if info["mode"] == storage.MONGO_BACKEND:
+            st.caption("会话存在 MongoDB（跨重启保留）")
+            if info["uri"]:
+                st.code(info["uri"], language="text")
+            if username:
+                st.caption(f"当前用户：{username}")
+            if info["documents"] is not None:
+                st.caption(f"这个账号名下有 {info['documents']} 个文档")
+        else:
+            st.warning(
+                "会话存在**容器本地文件**里。Streamlit Cloud 上本地文件"
+                "**随时会被重置**（休眠、改设置、push 代码都会触发），历史记录会丢。\n\n"
+                "线上请把 `MONGO_URI` 配到 App 的 **Settings → Secrets**。"
+            )
+            if info["secrets_error"]:
+                st.caption(f"读取 secrets 的情况：{info['secrets_error']}")
+        if not info["ok"]:
+            st.error(f"**MongoDB 连不上**：{info['error']}")
+
+
 def _render_key_input(state_key: str = None) -> None:
     """侧边栏里让用户填/改自己的 Key（登录后也能随时改）。"""
     with st.expander("API Key", expanded=not ai.user_api_key()):
@@ -182,6 +211,7 @@ def main() -> None:
             st.caption(f"已登录：{user.get('name') or user['username']}")
             if st.button("退出登录", width="stretch", icon=":material/logout:"):
                 auth.do_logout()
+        _render_storage_status(user.get("username") if auth.auth_enabled() else None)
         _render_api_key_status()
         _render_key_input()
 
