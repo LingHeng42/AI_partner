@@ -40,6 +40,14 @@ LOCAL_BACKEND = "local"
 MONGO_BACKEND = "mongo"
 
 _state = threading.local()
+# 跨渲染共享的读缓存：{命名空间: {键: 值}}。命名空间带上用户与后端，
+# 所以绝不会把别人的数据串过来；任何写入都会整体作废（见 reset_cache）。
+_caches = {}
+_cache_lock = threading.Lock()
+# mongodb 客户端单独存：读缓存会被写入作废，客户端不能跟着被丢掉
+_client_holder = {}
+# 每个连接串只做一次"建连通不通"的校验，避免每次 active() 都 ping
+_mongo_ready = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -48,21 +56,13 @@ _state = threading.local()
 def set_current_uid(uid: str) -> None:
     """设置当前请求属于哪个用户（ui.main() 每次重跑都会调一次）。
 
-    Streamlit 每个会话跑在自己的线程里，所以用 threading.local 是安全的：
-    另一个用户的请求不会看到这个值。未设置时（纯逻辑测试、脚本调用）退化成
-    "local" 用户，这样本地单独跑某个函数也不会炸。
+    每个 Streamlit 会话有自己的 session_state，但**线程可能被复用**，所以
+    当前用户存在 threading.local 里，保证并发请求之间不会串。
 
-    同时负责维护**本次渲染的读缓存**：
-    - 换了用户 → 清空（绝不能把上一个用户的数据留在缓存里）
-    - 换了存档根目录 → 清空（测试会在隔离目录与默认目录之间切换）
-    缓存只在一次脚本运行内有效，下一次重跑必须重新读盘。
+    读缓存不在这里清空：它按"用户 + 后端 + 存档根目录"分命名空间，
+    由写入操作作废（reset_cache）。这样跨交互也能复用，才真正省下网络往返。
     """
     _state.uid = str(uid or "").strip() or "local"
-    base = str(config.archive_dir())
-    if getattr(_state, "memo_base", None) != base or getattr(_state, "memo_uid", None) != _state.uid:
-        _state.memo = {}
-        _state.memo_base = base
-        _state.memo_uid = _state.uid
     # 每次脚本运行都重新计数：侧边栏显示的是"本次渲染发起了几次存储请求"
     _state.requests = 0
 
@@ -302,41 +302,60 @@ def status() -> dict:
 
 
 def _client():
-    """pymongo 客户端（按连接串缓存，避免每次重跑都重新握手）。"""
+    """pymongo 客户端（全局共享一个，按连接串区分）。
+
+    pymongo 官方说明 ``MongoClient`` 是**线程安全**的，而且它自带连接池 ——
+    每次都新建客户端会反复做 DNS + TLS 握手 + 选主，那是几百毫秒级的开销。
+    这里特意放在 ``_client_holder``（而不是读缓存里）：读缓存会被写入操作整体
+    作废，客户端不能跟着被丢掉。
+    """
     uri = mongo_uri()
-    cached = getattr(_state, "client", None)
-    cached_uri = getattr(_state, "client_uri", None)
-    if cached is not None and cached_uri == uri:
-        return cached
+    with _cache_lock:
+        cached = _client_holder.get("client")
+        if cached is not None and cached[0] == uri:
+            return cached[1]
     from pymongo import MongoClient
 
     # 连接是懒建立的；给一个不短的超时，免得网络不通时页面卡死
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000, connectTimeoutMS=8000)
-    _state.client = client
-    _state.client_uri = uri
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+        # 连接池开大一点：多个用户的会话会并发用同一个客户端
+        maxPoolSize=20,
+    )
+    with _cache_lock:
+        _client_holder["client"] = (uri, client)
     return client
 
 
 def _memo() -> dict:
-    """本次渲染的读缓存（见 cached 的说明）。"""
-    memo = getattr(_state, "memo", None)
-    if memo is None:
-        memo = {}
-        _state.memo = memo
-    return memo
+    """当前用户的读缓存（跨渲染共享，见 _CachedBackend 的说明）。"""
+    key = f"{current_uid()}|{config.archive_dir()}|{mongo_uri()}"
+    with _cache_lock:
+        return _caches.setdefault(key, {})
 
 
 def bump_requests() -> None:
     """记一次真实的存储请求（缓存未命中的那些）。
 
     侧边栏会显示"本次渲染发起了几次请求"。这是判断"慢在哪"最直接的指标：
-    每次请求在 MongoDB 上都是一次网络往返，几十次就是肉眼可见的卡顿。
+    每次请求在 MongoDB 上都是一次网络往返。
     """
     _state.requests = getattr(_state, "requests", 0) + 1
 
 
 def request_count() -> int:
     return getattr(_state, "requests", 0)
+
+
+def reset_cache() -> None:
+    """清空所有用户的读缓存（任何写入都会调它）。
+
+    宁可整体作废也不要读到过期数据：写操作远少于读操作，代价可以忽略。
+    """
+    with _cache_lock:
+        _caches.clear()
 
 
 class _CachedBackend:
@@ -366,15 +385,13 @@ class _CachedBackend:
         return self._inner.kind
 
     def _invalidate_lists(self) -> None:
-        """任何写入/删除都要作废"目录列表"缓存。
+        """任何写入/删除都要作废缓存（读写比很高，整体作废最简单也最安全）。
 
         列表是按前缀缓存的（一次渲染内要反复列会话），但新增/删除文件会改变列表
         内容。曾经漏了这一步，导致"刚保存的会话在会话历史里不出现"——因为列表
         缓存里还是写入之前的空结果。宁可整体丢掉列表缓存，也不要读到过期列表。
         """
-        memo = _memo()
-        for key in [k for k in memo if "|list|" in k]:
-            del memo[key]
+        reset_cache()
 
     def get(self, rel: str) -> bytes:
         memo = _memo()
@@ -448,7 +465,7 @@ class _CachedBackend:
     def delete_prefix(self, prefix: str) -> int:
         bump_requests()
         count = self._inner.delete_prefix(prefix)
-        _state.memo = {}  # 删了一片，缓存整体作废最省心
+        reset_cache()  # 删了一片，缓存整体作废
         return count
 
 
@@ -464,17 +481,16 @@ def active():
     if using_mongo():
         # 每次渲染只建立/校验一次连接：active() 在一次运行里会被调用几十次，
         # 每次都 ping + 建索引就是白白多出几十个网络往返（实测这是主要开销之一）。
-        ready = getattr(_state, "mongo_ready", None)
         uri = mongo_uri()
         prefix = f"mongo:{uri}:{current_uid()}"
-        if ready == uri:
+        if _mongo_ready.get(uri):
             return _CachedBackend(MongoBackend(_client(), current_uid(), ensure_index=False), prefix)
         try:
             backend = MongoBackend(_client(), current_uid())
             # 构造后端时就会建索引，连不上会在这里抛；再 ping 一次确认真的通
             backend.collection.database.client.admin.command("ping")
             _state.mongo_error = None
-            _state.mongo_ready = uri
+            _mongo_ready[uri] = True
             return _CachedBackend(backend, prefix)
         except RuntimeError:
             raise

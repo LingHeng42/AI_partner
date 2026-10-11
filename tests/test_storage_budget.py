@@ -99,6 +99,16 @@ if counts2:
     print(f"      （发一条消息，本次渲染发起 {second} 次请求）")
     check("发消息时的请求数在预算内（≤ 30）", second <= 30, second)
 
+# 关键：读缓存是**跨交互**共享的（按用户+后端+根目录分命名空间，写入才作废）。
+# 如果每次交互都要回数据库，用户就会觉得"点什么都要等一下"。
+at3 = at2.chat_input[0].set_value("再问一句").run()
+captions3 = [str(c.value) for c in at3.caption]
+counts3 = [c for c in captions3 if "次存储请求" in c]
+if counts3:
+    third = int("".join(ch for ch in counts3[0] if ch.isdigit()))
+    print(f"      （再发一条，本次渲染发起 {third} 次请求）")
+    check("连续交互时请求数不增长（读缓存跨渲染复用）", third <= (second or 30), third)
+
 # 缓存必须不能让数据变旧：写完立刻读得到
 storage.set_current_uid("local")
 target = "sessions/2026-03-01_000000_000/meta.json"
@@ -110,6 +120,10 @@ new_id = "sessions/2026-09-09_000000_000/meta.json"
 storage.write_json(new_id, {"title": "新会话", "pinned": False, "branches": []})
 check("新写的会话立刻出现在会话列表里（列表缓存会被作废）",
       "2026-09-09_000000_000" in storage.session_ids(), storage.session_ids())
+
+check("写入会作废读缓存（避免读到过期数据）",
+      storage.read_json(new_id) is not None and storage.request_count() >= 1,
+      storage.request_count())
 
 print()
 print("FAILURES:", failures if failures else "none")
