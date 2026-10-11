@@ -670,9 +670,11 @@ def request_new_session() -> None:
 
 def run_pending_actions() -> None:
     """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。"""
-    target = st.session_state.pop(PENDING_DELETE, None)
+    target = st.session_state.get(PENDING_DELETE)
     if target:
+        st.session_state[PENDING_DELETE] = None
         delete_session(target)          # 内部会 st.rerun()，后面的代码不会执行
         return
-    if st.session_state.pop(PENDING_NEW, None):
+    if st.session_state.get(PENDING_NEW):
+        st.session_state[PENDING_NEW] = None
         new_session()

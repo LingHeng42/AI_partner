@@ -218,12 +218,28 @@ Streamlit Community Cloud 的出口 IP **不固定且官方不公布**，只放�
 
 ## 项目结构
 
-> ⚠️ **`lingheng/__init__.py` 不能删。** 删了它 `lingheng` 会退化成
-> namespace package，本地 Python 3.12 照常跑，但 Streamlit Cloud 的 **Python 3.14**
-> 会在导入期抛 `KeyError: 'lingheng.config'` /
-> `partially initialized module ... (circular import)`，页面脚本根本执行不完 ——
-> 表现是"切换/删除会话后一片空白"。这条有回归测试
-> （[tests/test_package_import.py](tests/test_package_import.py)），别绕过它。
+> ⚠️ **两条"本地测不出来、线上直接白屏"的硬规矩**，改代码前先看：
+
+> **1. `lingheng/__init__.py` 不能删。** 删了它 `lingheng` 会退化成 namespace
+> package。本地 Python 3.12 照常跑，但 Streamlit Cloud 的 **Python 3.14** 会在导入期
+> 抛 `KeyError: 'lingheng.config'` / `partially initialized module ... (circular import)`，
+> 页面脚本根本执行不完。
+
+> **2. 不要对 `st.session_state` 用 `.pop()` / `.setdefault()` / `.update()`。**
+> 真实的 session_state 是代理对象，**没有这些方法**；属性访问会退化成"读取同名键"，
+> 直接抛 `KeyError: st.session_state has no key "setdefault"`。它发生在主脚本体一开头，
+> 于是每次重跑页面全白。正确写法：
+>
+> ```python
+> if key not in st.session_state:
+>     st.session_state[key] = default          # 代替 setdefault
+> value = st.session_state.get(key)            # 代替 pop
+> st.session_state[key] = None
+> ```
+
+这两条都有回归测试（[tests/test_package_import.py](tests/test_package_import.py)
+里含一条**静态检查**：剥掉注释与字符串后扫描 `session_state.pop/setdefault/update`），
+因为它们用测试桩根本测不出来 —— 桩对象有那些方法。
 
 ```
 AI_partner.py        入口（薄）：代理导出包里的名字，并执行页面

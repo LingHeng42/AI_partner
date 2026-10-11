@@ -160,30 +160,40 @@ def main() -> None:
     if st.session_state.get("_uid") not in (None, uid):
         for _key in ("current_session", "session_title", "current_branch",
                      sessions.OWNER_STATE, "message", "pending_regen", "editing_index"):
-            st.session_state.pop(_key, None)
+            st.session_state[_key] = None
     st.session_state["_uid"] = uid
 
-    # 会话状态初始化
+    # 会话状态初始化。
+    # ⚠️ 必须用 `if key in session_state` + 下标赋值，**不能**用
+    # `st.session_state.setdefault(...)` / `.pop(...)`：真实的 session_state 是个
+    # 代理对象，没有这两个方法，属性访问会退化成"读取同名键"从而抛
+    # `KeyError: st.session_state has no key "setdefault"` —— 主脚本体一开始就崩，
+    # 表现就是每次重跑页面全白（线上真踩过，测试里的假 session_state 有这两个方法
+    # 所以本地一直没发现）。
+    def _default(key, value):
+        if key not in st.session_state:
+            st.session_state[key] = value
+
     for _key, _value in config.DEFAULT_PROFILE.items():
-        st.session_state.setdefault(_key, _value)
+        _default(_key, _value)
     for _key, _value in config.DEFAULT_ADVANCED.items():
-        st.session_state.setdefault(_key, _value)
-    st.session_state.setdefault("message", [])
-    st.session_state.setdefault("thinking", False)
-    st.session_state.setdefault("session_title", store.DEFAULT_SESSION_TITLE)
+        _default(_key, _value)
+    _default("message", [])
+    _default("thinking", False)
+    _default("session_title", store.DEFAULT_SESSION_TITLE)
     # 对话头像：每个会话独立，未设置时为 None（用 Streamlit 的默认头像）
     for _key in config.AVATAR_KEYS:
-        st.session_state.setdefault(_key, None)
+        _default(_key, None)
     # 当前所在分支（一条分支 = 一条线性消息列表；切换分支就是整体换掉 message）
-    st.session_state.setdefault("current_branch", "main")
+    _default("current_branch", "main")
     # 内存里的 message 属于哪个会话的哪条分支（渲染时据此判断要不要从磁盘重载）
-    st.session_state.setdefault(sessions.OWNER_STATE,
-                                sessions.message_owner(st.session_state.get("current_session"),
-                                                       st.session_state.current_branch))
+    _default(sessions.OWNER_STATE,
+             sessions.message_owner(st.session_state.get("current_session"),
+                                    st.session_state.current_branch))
     # 「重新生成」标记：按钮回调里只做标记，流式请求交给页面主体
-    st.session_state.setdefault("pending_regen", False)
+    _default("pending_regen", False)
     # 正在就地编辑第几条消息（None = 没有在编辑）
-    st.session_state.setdefault("editing_index", None)
+    _default("editing_index", None)
     if "current_session" not in st.session_state:
         st.session_state.current_session = store.new_session_id()
 

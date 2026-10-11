@@ -98,6 +98,54 @@ for earlier, later in (("config", "storage"), ("storage", "store"), ("auth", "ai
 check("入口没有遗留的调试 print", "TRACE" not in entry.upper() or "TRACE" not in entry,
       [line for line in entry.splitlines() if "TRACE" in line])
 
+# --------------------------------------------------------------------------- #
+# 3.5 禁止对 session_state 用"属性式"访问（pop / setdefault / update / copy）
+#
+# 线上事故：``st.session_state.pop(KEY, None)`` 在真实的 session_state 上不是方法
+# 调用，而是被当成"读取名为 pop 的键"，直接抛::
+#
+#     KeyError: 'st.session_state has no key "pop"'
+#
+# 它发生在主脚本体**一开头**（run_pending_actions），于是每次重跑页面都空白。
+# 测试里的假 session_state 有 pop 方法，所以本地跑不出来 —— 只能靠静态检查兜住。
+# 正确写法：先 ``get()`` 再 ``st.session_state[KEY] = None``。
+# --------------------------------------------------------------------------- #
+import io  # noqa: E402
+import re  # noqa: E402
+import tokenize  # noqa: E402
+
+BAD_SESSION_ACCESS = (
+    r"session_state\s*\.\s*pop\s*\(",
+    r"session_state\s*\.\s*setdefault\s*\(",
+    r"session_state\s*\.\s*update\s*\(",
+)
+
+
+def code_only(path: Path) -> str:
+    """去掉注释与字符串字面量，只留真正的代码。
+
+    否则连"注释里说明不要用 setdefault"都会被判成违规（假阳性）。
+    """
+    text = path.read_text(encoding="utf-8")
+    out = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+                continue
+            out.append(tok.string)
+    except tokenize.TokenError:
+        return text
+    return " ".join(out)
+
+
+offenders = []
+for py in sorted(PACKAGE.glob("*.py")) + [PROJECT / "AI_partner.py"]:
+    text = code_only(py)
+    for pattern in BAD_SESSION_ACCESS:
+        for _ in re.finditer(pattern, text):
+            offenders.append(f"{py.name}: {pattern}")
+check("没有对 session_state 用属性式访问（pop/setdefault/update）", not offenders, offenders)
+
 # 最终验证：**完整导入入口**（含全部子模块与代理导出），不触发页面渲染。
 # 这一步是"Python 3.12 本地也能抓住那个事故"的关键：如果 lingheng 退化成
 # namespace package、或者导入顺序不对，这里就会报 KeyError / circular import。
@@ -122,6 +170,7 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 at = AppTest.from_file(str(PROJECT / "AI_partner.py"), default_timeout=90).run()
 check("真实入口能正常渲染（没有导入期异常）", not at.exception,
       [e.message[:200] for e in at.exception])
+check("首次渲染确实画出了页面（不是空白）", len(at.main) >= 1, len(at.main))
 
 print()
 print("FAILURES:", failures if failures else "none")

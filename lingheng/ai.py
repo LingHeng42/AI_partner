@@ -205,7 +205,10 @@ def reasoning_expander(key: str, state_key: str, expanded: bool):
     type="compact" 是 Streamlit 官方推荐的思考块样式（无边框内联展开），
     与 ChatGPT / DeepSeek 的「思考过程」观感一致。
     """
-    st.session_state.setdefault(state_key, expanded)
+    # 注意：不能用 st.session_state.setdefault —— 真实的 session_state 是代理对象，
+    # 没有这个方法，属性访问会变成"读取同名键"并抛 KeyError（线上白屏的原因之一）。
+    if state_key not in st.session_state:
+        st.session_state[state_key] = expanded
     return st.expander(
         "思考过程",
         expanded=st.session_state[state_key],

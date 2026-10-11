@@ -277,6 +277,8 @@ def do_logout() -> None:
             authenticator.logout(location="sidebar")
         except Exception:  # noqa: BLE001 - 老版本可能签名不同
             pass
+    # 不能用 st.session_state.pop：真实的 session_state 是代理对象，没有 pop 方法，
+    # 属性访问会变成"读取名为 pop 的键"并抛 KeyError。用下标赋值即可。
     for key in ("authentication_status", "username", "name", "email"):
-        st.session_state.pop(key, None)
+        st.session_state[key] = None
     st.rerun()
