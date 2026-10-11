@@ -17,7 +17,7 @@ SUITES = ("test_logic.py", "test_smoke.py", "test_row_render.py", "test_branch_u
           "test_avatar_ui.py", "test_rerun_render.py", "test_auth_ui.py",
           "test_user_isolation.py", "test_mongo_ui.py",
           "test_secrets_format.py", "test_session_switch.py",
-          "test_storage_budget.py")
+          "test_storage_budget.py", "test_no_data_loss.py")
 
 failures = []
 for suite in SUITES:

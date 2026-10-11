@@ -245,12 +245,22 @@ def main() -> None:
         # )
 
         st.subheader("会话历史")
-        session_list = sessions.load_session_list()
+        # 列会话本身也可能失败（数据库抖动）。失败时给出提示而不是让整页崩掉 ——
+        # 白屏比"暂时列不出来"更糟，用户会以为数据全没了。
+        try:
+            session_list = sessions.load_session_list()
+        except Exception as exc:  # noqa: BLE001
+            session_list = []
+            st.error(f"会话列表暂时读不出来（{exc}）。请稍后刷新页面重试。")
         if not session_list:
             st.caption("还没有会话。发出第一条消息后，这里会出现本次会话。")
         for session in session_list:
             current = session == st.session_state.current_session
-            meta = sessions.load_session_meta(session)
+            try:
+                meta = sessions.load_session_meta(session)
+            except Exception:  # noqa: BLE001 - 单条读不出来不该拖垮整个列表
+                st.warning(f"这条会话的信息暂时读不出来：{session}")
+                continue
             # 当前会话的名称/昵称直接取内存里的，避免与输入框内容不一致。
             # 「是不是当前会话」由按钮颜色（type=primary）表示，名称里不再加"（当前）"
             label = st.session_state.session_title if current else meta["title"]
@@ -327,8 +337,15 @@ def main() -> None:
             # 这样"切会话/切分支"只依赖回调写盘，不依赖回调改内存状态。
             owner = sessions.message_owner(sid, disk_branch)
             if st.session_state.get(sessions.OWNER_STATE) != owner:
-                st.session_state.message = sessions.read_branch(sid, disk_branch).get("message", [])
-                sessions.mark_message_owner(sid, disk_branch)
+                try:
+                    # 读失败会抛异常：这时**必须保持内存里的消息不动**。
+                    # 曾经把读失败当成"空分支"，于是主区域显示空对话、下一次保存
+                    # 又把空内容写回磁盘，把历史永久覆盖掉。
+                    st.session_state.message = sessions.read_branch(sid, disk_branch).get("message", [])
+                    sessions.mark_message_owner(sid, disk_branch)
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(f"这条会话的内容暂时读不出来（{exc}）。"
+                               "已保留当前显示，请稍后重试或刷新页面。")
             current_branch = disk_branch
             branch_list = sessions.branch_ids(sid)
             with st.expander(f"分支（{len(branch_list)}）", expanded=False, key="branch_expander"):

@@ -58,18 +58,28 @@ def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_in
 
 
 def switch_branch(session_name: str, branch_id: str) -> None:
-    """切换当前分支：先确保目标分支文件存在，最后才改 meta 里的指针。
+    """切换当前分支：只改 meta 里的指针，**绝不写分支内容**。
 
-    顺序很重要：反过来可能出现"指针指向一条还不存在的分支"。
-    这是按钮回调，Streamlit 在回调之后本来就会重跑一次，所以这里不调用
-    st.rerun()：多调一次会让 st.rerun 之后的代码被整体跳过，而且快速重跑
-    在部分环境下（如 AppTest）不会被执行，反而看不清真实行为。
+    这里以前会"读出来再原样写回去"，目的是给缺失的分支补一个空文件。但那等于
+    把读到的内容当成了权威值 —— 一旦读取失败（网络抖动 / 超时），就会把空内容
+    写回磁盘，永久覆盖掉这条分支的历史。现在只在文件**确实不存在**时才补空文件，
+    已存在的一律不碰。
+
+    顺序也很重要：先确保目标分支可用，最后才改 meta 指针，避免"指针指向不存在
+    的分支"。这是按钮回调，Streamlit 在回调之后本来就会重跑一次，所以这里不调用
+    st.rerun()（多调一次会让 st.rerun 之后的代码被整体跳过）。
     """
     if branch_id not in sessions.branch_ids(session_name):
         st.error(f"分支不存在：{branch_id}")
         return
-    data = sessions.read_branch(session_name, branch_id)
-    sessions.write_branch(session_name, branch_id, data)  # 不存在时补一个空分支文件
+    key = store.branch_path(session_name, branch_id)
+    if not storage.exists(key):
+        # 该分支在 meta 里登记过但文件还没落盘：补一个空文件，内容由后续保存填充
+        sessions.write_branch(session_name, branch_id, {"message": []})
+    elif storage.read_json(key, None) is None:
+        # 文件在、但内容读不出来：宁可报错也不要猜（猜错就是丢数据）
+        st.error(f"分支内容读不出来，已取消切换：{branch_id}")
+        return
     meta = sessions.load_session_meta(session_name)
     meta["current_branch"] = branch_id
     sessions.write_session_meta(session_name, meta)

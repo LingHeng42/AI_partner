@@ -68,16 +68,21 @@ def load_session_meta(session_name: str) -> dict:
 
     - 新结构：<会话目录>/meta.json
     - 旧结构（扁平 <会话ID>.json）：现场合成一份等价元信息，首次保存时自动迁移
-    - 什么都没有：给出默认值（一个空会话，只有 main 分支）
+    - 确实没有：给出默认值（一个空会话，只有 main 分支）
+
+    **读失败会抛异常**，不会静默变成"空会话"：静默降级会让上层把默认值写回磁盘，
+    等于用一次网络抖动抹掉用户的会话信息。
     """
     try:
         key = _meta_key(session_name)
     except ValueError:
         return default_session_meta(session_name)
-    data = storage.read_json(key)
+    data = storage.read_json(key, None)
     if isinstance(data, dict):
         data["_legacy"] = False
         return data
+    if data is not None:
+        raise ValueError(f"meta.json 结构不对：{key}")
     flat = _legacy_key(session_name)  # 兼容旧扁平存档
     if storage.exists(flat):
         return _legacy_meta(session_name, flat)
@@ -104,11 +109,15 @@ def default_session_meta(session_name: str) -> dict:
 
 
 def _legacy_meta(session_name: str, flat: str) -> dict:
-    """把旧扁平存档合成新结构需要的元信息（先只读，落盘时再迁移）。"""
+    """把旧扁平存档合成新结构需要的元信息（先只读，落盘时再迁移）。
+
+    读不出来时**抛异常**：调用方（例如"改名"）会把 meta 写回去，静默给默认值
+    等于把旧存档的标题/人设一起抹掉。
+    """
     meta = default_session_meta(session_name)
-    data = storage.read_json(flat)
+    data = storage.read_json(flat, None)
     if not isinstance(data, dict):
-        return meta
+        raise ValueError(f"旧存档内容读不出来：{flat}")
     meta["title"] = (data.get("title") or "").strip() or session_name
     meta["pinned"] = bool(data.get("pinned"))
     meta["_legacy"] = True
@@ -157,16 +166,53 @@ def write_session_meta(session_name: str, meta: dict) -> None:
 
 
 def read_branch(session_name: str, branch_id: str) -> dict:
-    """读一条分支的内容；没有文件时返回空消息列表。"""
+    """读一条分支的内容。
+
+    - 分支文件**不存在**：合法的"空分支"，返回 {"message": []}
+    - 文件存在但内容坏了 / 存储层报错：**抛异常**，绝不返回空
+
+    第二点是血泪教训：以前任何异常都返回空列表，而"切换分支"会把读到的内容原样
+    写回去 —— 于是一次读取失败就把这条分支的历史永久覆盖成空的（表现为"切换会话后
+    历史变空、AI 也不再参考上下文"）。宁可让调用方看到错误，也不能静默丢数据。
+    """
     try:
         key = store.branch_path(session_name, branch_id)
     except ValueError:
         return {"message": []}
-    data = storage.read_json(key)
-    return data if isinstance(data, dict) else {"message": []}
+    data = storage.read_json(key, None)
+    if data is None:
+        return {"message": []}
+    if not isinstance(data, dict):
+        raise ValueError(f"分支文件结构不对：{key}")
+    return data
 
 
-def write_branch(session_name: str, branch_id: str, data: dict) -> None:
+def write_branch(session_name: str, branch_id: str, data: dict, force: bool = False) -> None:
+    """写一条分支。
+
+    **防覆盖保护**：如果要把"零条消息"写到一个已经有消息的分支上，默认拒绝。
+
+    为什么把保护放在这个最底层：任何写入路径（保存会话、切换分支、编辑消息、
+    重新生成）最终都会走到这里。放在这里就不可能被新代码绕过。
+    触发条件是"静默失败导致内存里没有消息"这类事故 —— 例如读超时被当成空分支，
+    随后保存又把空内容写回磁盘，用户的对话就永久没了。
+
+    真的需要清空某条分支时，显式传 ``force=True``。
+    返回 True 表示写入了。
+    """
+    messages = data.get("message")
+    if not force and isinstance(messages, list) and not messages:
+        try:
+            existing = read_branch(session_name, branch_id).get("message") or []
+        except Exception:  # noqa: BLE001 - 连"确认现有内容"都做不到时，宁可不写
+            st.warning("暂时读不到这条分支的现有内容，为避免误覆盖，本次不保存。")
+            return
+        if existing:
+            st.warning(
+                "内存里没有消息，但存档里还有 —— 为避免用空内容覆盖历史，本次不保存。\n\n"
+                "如果确实想清空这个会话，请新建一个会话。"
+            )
+            return
     storage.write_json(store.branch_path(session_name, branch_id), data)
 
 

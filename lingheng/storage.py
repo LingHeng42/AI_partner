@@ -524,13 +524,19 @@ def backend_kind() -> str:
 # 给上层用的便捷读写
 # --------------------------------------------------------------------------- #
 def read_json(rel: str, default=None):
+    """宽松读：**只在文件确实不存在**时返回 default。
+
+    存储层自身的异常（连不上、超时、权限）会**照原样抛出去** —— 这一点很关键：
+    曾经把"读失败"也当成"没有内容"，于是上层拿到空数据后又写回磁盘，
+    一次网络抖动就把用户的对话历史永久覆盖成空的。
+    """
     raw = active().get(rel)
     if not raw:
         return default
     try:
         return json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return default
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"文件内容不是合法 JSON：{rel}") from exc
 
 
 def write_json(rel: str, data) -> None:
