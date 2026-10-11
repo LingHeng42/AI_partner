@@ -48,6 +48,10 @@ ARCHIVE_DIR = Path(
 #   branches/<分支ID>.json   一条分支 = 一条线性消息列表
 META_FILENAME = "meta.json"
 BRANCHES_SUBDIR = "branches"
+# 还没产生对话的会话，人设与参数暂存在这里：<根>/sessions/drafts/<会话ID>.draft
+# 注意：每条"新建会话"都会写一个草稿，如果这条会话一直没发消息，它就永远不进会话
+# 历史、用户也就删不掉它 —— 所以必须主动清理（见 sessions.purge_other_drafts）。
+DRAFTS_SUBDIR = "drafts"
 # 头像等会话内图片：<会话目录>/attachments/<内容哈希>.<ext>
 ATTACHMENTS_SUBDIR = "attachments"
 # 对话头像：每个会话独立设置，只影响聊天气泡左侧显示，不会发给模型

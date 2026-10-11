@@ -135,6 +135,48 @@ def clean_empty(uid: str, delete: bool, dry_run: bool) -> int:
     return len(empties)
 
 
+def clean_drafts(uid: str, delete: bool, dry_run: bool, keep_days: float) -> int:
+    """清理**过期草稿**（`sessions/drafts/*.draft`）。
+
+    草稿是"还没产生对话的会话"的暂存（人设/参数/头像）。每条「新建会话」都会写
+    一个；如果这条会话一直没发消息，它就不进会话历史，用户在界面上看不到、也删不掉
+    它 —— 草稿于是永远留着，用几次就攒一堆（用户发现的：删了会话但 .draft 还在）。
+
+    注意：**最近 keep_days 天内的草稿一律保留**。草稿里存着头像/人设，用户切走再
+    切回来时那些设置必须还在（这是明确的功能）。只清理明显没人会再回去的。
+
+    用法：
+        python tests/migrate_sessions.py --drafts --dry-run
+        python tests/migrate_sessions.py --drafts --delete
+        python tests/migrate_sessions.py --drafts --delete --keep-days 7
+    """
+    from lingheng import sessions
+
+    storage.set_current_uid(uid)
+    ids = sessions.draft_ids()
+    if not ids:
+        print("没有草稿。")
+        return 0
+    print(f"当前用户 {uid} 下有 {len(ids)} 个草稿（保留最近 {keep_days} 天）：")
+    removed = 0
+    for name in ids:
+        age = sessions._session_id_age_days(name)
+        stale = age >= keep_days
+        mark = "过期可清" if stale else "保留（还新）"
+        print(f"  {name}  {age:.1f} 天  [{mark}]")
+        if dry_run or not delete or not stale:
+            continue
+        sessions.discard_draft(name)
+        removed += 1
+    if dry_run:
+        print("\n预演完成。确认无误后加 --delete 再跑一次。")
+    elif not delete:
+        print("\n未删除任何草稿。确认无误后加 --delete。")
+    else:
+        print(f"\n已清理 {removed} 个过期草稿。")
+    return removed
+
+
 def move_partition(source: str, target: str, delete: bool, dry_run: bool) -> int:
     """把一个"用户分区"下的数据搬到另一个分区。
 
@@ -195,6 +237,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不改动")
     parser.add_argument("--empty", action="store_true",
                         help="改为清理空壳会话（没有任何消息的会话）")
+    parser.add_argument("--drafts", action="store_true",
+                        help="改为清理过期草稿（sessions/drafts/*.draft，白占空间的来源）")
+    parser.add_argument("--keep-days", type=float, default=1.0, metavar="天数",
+                        help="清理草稿时保留最近多少天（默认 1；草稿里存着头像/人设，"
+                             "切走再切回还要用，别清太狠）")
     parser.add_argument("--from-partition", default=None, metavar="用户名",
                         help="把某个用户分区下的数据搬到 --uid 名下（修「写错分区」的历史数据）")
     args = parser.parse_args()
@@ -208,6 +255,10 @@ def main() -> int:
     if args.empty:
         count = clean_empty(uid, args.delete, args.dry_run)
         print(f"\n处理了 {count} 个空壳会话。")
+        return 0
+    if args.drafts:
+        count = clean_drafts(uid, args.delete, args.dry_run, args.keep_days)
+        print(f"\n处理了 {count} 个过期草稿。")
         return 0
     if storage.backend_kind() == storage.MONGO_BACKEND:
         count = mongo_migrate(uid, args.delete, args.dry_run)

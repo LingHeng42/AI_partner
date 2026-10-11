@@ -377,6 +377,58 @@ def discard_draft(session_name: str = None) -> None:
             pass
 
 
+def draft_ids() -> list:
+    """当前用户下所有草稿的会话 ID。"""
+    prefix = f"{store.SESSIONS_ROOT}/{config.DRAFTS_SUBDIR}/"
+    out = []
+    for rel in storage.list_files(f"{store.SESSIONS_ROOT}/{config.DRAFTS_SUBDIR}"):
+        if rel.startswith(prefix) and rel.endswith(".draft"):
+            out.append(Path(rel).name[: -len(".draft")])
+    return sorted(out)
+
+
+def _session_id_age_days(session_id: str) -> float:
+    """会话 ID 里带时间戳（如 ``2026-10-11_155423_140``），算出它离现在多少天。
+
+    注意：时间戳部分是**前 17 个字符**（``%Y-%m-%d_%H%M%S`` = 10 + 1 + 6），
+    后面还有 ``_`` 加 3 位毫秒。这里曾经写成 ``[:19]``，多切了一个字符导致
+    strptime 永远失败、函数永远返回 0 —— 结果是草稿 GC 一个都清不掉（白写）。
+    解析不出来时返回 0（当作"很新"）：宁可留一个陈旧草稿，也不误删用户的设置。
+    """
+    import datetime
+
+    try:
+        stamp = datetime.datetime.strptime(session_id[:17], "%Y-%m-%d_%H%M%S")
+    except (ValueError, TypeError):
+        return 0.0
+    return (datetime.datetime.now() - stamp).total_seconds() / 86400.0
+
+
+def purge_stale_drafts(keep_days: float = 1.0, current: str = None) -> int:
+    """清掉**过期**的草稿，返回清掉的个数。
+
+    为什么需要：每条"新建会话"都会立刻写一个草稿（这样改人设能即时落盘）。
+    如果这条会话一直没发过消息，它就不进会话历史 —— 用户在界面上看不到、也删不掉
+    它，草稿就永远留在库里，用几次就攒一堆 `.draft` 白占空间（用户就是这么发现的）。
+
+    **判断标准必须是年龄，不能是"是不是当前会话"**：草稿里存着头像/人设等设置，
+    用户切走再切回来时那些设置必须还在（这是明确的功能，有测试守着）。所以只清理
+    明显过期的：默认保留最近 1 天内的草稿。
+
+    current 指定要保留的会话（通常是当前会话，即使它很旧也留着）。
+    """
+    keep = current if current is not None else st.session_state.get("current_session")
+    removed = 0
+    for name in draft_ids():
+        if name == keep:
+            continue
+        if _session_id_age_days(name) < keep_days:
+            continue
+        discard_draft(name)
+        removed += 1
+    return removed
+
+
 def _file_pinned() -> bool:
     """当前会话存档里的置顶状态。
 
@@ -589,6 +641,14 @@ def load_selected_session(session_name: str) -> None:
         # 记下"这批消息属于这个会话的这条分支"
         mark_message_owner(session_name, st.session_state.current_branch)
         st.session_state.current_session = session_name
+        # 顺手清掉**过期**的草稿（默认保留最近 1 天）。
+        # 不能清"不是当前会话"的草稿 —— 草稿里存着头像/人设，用户切走再切回来时
+        # 必须还在（有测试守着）。只清理明显没人会再回去的陈旧草稿，避免库里
+        # 攒一堆 `.draft` 白占空间（用户发现的问题）。
+        try:
+            purge_stale_drafts(current=session_name)
+        except Exception:  # noqa: BLE001 - 清理失败绝不能影响切换
+            pass
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
         return
