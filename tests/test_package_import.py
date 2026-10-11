@@ -209,6 +209,30 @@ for node in _ast.walk(tree):
         )
 check("run_pending_actions 执行完会重跑一次（用新状态重画）", pending_has_rerun)
 
+# --------------------------------------------------------------------------- #
+# 3.7 main() 里 set_current_uid 必须早于 run_pending_actions
+#
+# 线上事故：storage._state.uid 的默认值是 "local"。待办动作排在设置用户名之前，
+# 于是首次渲染时那批写入（新建会话、草稿）落进了 users/local/ 这个不属于任何人
+# 的分区 —— 用户库里真实出现了 users/local/sessions/drafts/*.draft。
+# 表现：界面里有会话、但在自己账号下查不到、删除报告 0 个键。
+# --------------------------------------------------------------------------- #
+ui_tree = _ast.parse((PACKAGE / "ui.py").read_text(encoding="utf-8"))
+main_node = next(n for n in _ast.walk(ui_tree)
+                 if isinstance(n, _ast.FunctionDef) and n.name == "main")
+uid_line = pending_line = None
+for node in _ast.walk(main_node):
+    if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute):
+        if node.func.attr == "set_current_uid" and uid_line is None:
+            uid_line = node.lineno
+        if node.func.attr == "run_pending_actions" and pending_line is None:
+            pending_line = node.lineno
+check("main() 里调用了 set_current_uid", uid_line is not None)
+check("main() 里调用了 run_pending_actions", pending_line is not None)
+check("set_current_uid 排在 run_pending_actions 之前（否则会写进 users/local）",
+      uid_line is not None and pending_line is not None and uid_line < pending_line,
+      f"set_current_uid@{uid_line} vs run_pending_actions@{pending_line}")
+
 # 最终验证：**完整导入入口**（含全部子模块与代理导出），不触发页面渲染。
 # 这一步是"Python 3.12 本地也能抓住那个事故"的关键：如果 lingheng 退化成
 # namespace package、或者导入顺序不对，这里就会报 KeyError / circular import。

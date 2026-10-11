@@ -104,6 +104,17 @@ def _render_storage_status(username: str = None) -> None:
                 st.caption(f"当前用户：{username}")
             if info["documents"] is not None:
                 st.caption(f"这个账号名下有 {info['documents']} 个文档")
+            # 全部分区摊开显示：如果这里出现 local 或别的名字，说明有数据写错了地方
+            partitions = info.get("partitions") or {}
+            current_key = storage.current_uid()
+            if len(partitions) > 1 or (partitions and current_key not in partitions):
+                st.warning(
+                    "⚠ 库里有多个「用户分区」："
+                    + "、".join(f"`{k}`={v}" for k, v in sorted(partitions.items()))
+                    + "\n\n不属于当前账号的那些是写错地方的数据（早期版本会在用户名"
+                      "设置之前写入，落到 `local` 下）。用 "
+                      "`python tests/migrate_sessions.py --from-partition` 可以合并过来。"
+                )
             st.caption(f"本次渲染发起 {requests} 次存储请求"
                        + ("（偏多，可能会话数量较大）" if requests > 60 else ""))
         else:
@@ -180,21 +191,26 @@ def main() -> None:
     _render_login()          # 第一道门：你是谁（未配置登录时直接放行）
     _render_api_key_gate()   # 第二道门：用谁的 key
 
-    # 待执行动作（新建/删除会话）必须在渲染与存储读写之前处理：它们会改
-    # current_session，而回调里的这类变更会被 Streamlit 回滚，导致删了还在。
-    sessions.run_pending_actions()
-
-    # 当前用户：**必须在任何存储读写之前**设置。存储层据此把读写限定在
-    # users/<用户名>/ 这棵子树里，所以一个用户不可能看到或碰到别人的会话。
+    # 当前用户**必须最先设置**，早于任何存储读写（包括下面的待办动作）。
+    #
+    # 血泪教训：以前"待办动作"排在设置用户名之前，而 _state.uid 的默认值是 "local"，
+    # 于是首次渲染时的那批写入（新建会话、草稿）会落到 users/local/ 这个不属于任何
+    # 人的分区里 —— 用户库里真实出现过 users/local/sessions/drafts/*.draft，
+    # 而且删除时也会用错用户名、匹配不到自己的数据。
     uid = auth.current_user_id()
     if auth.auth_enabled() and not uid:
         # 配了登录、但这次没解析出用户名（cookie 过期/被清）。
         # **绝不能**退回 "local" 这种兜底用户名去读写：那会让用户看到"自己的会话
-        # 全没了"，还会把数据写进一个不属于任何人的分区（库里出现 users/local/ 的
-        # 草稿就是这么来的）。这里直接停下，让用户重新登录。
+        # 全没了"，还会把数据写进一个不属于任何人的分区。这里直接停下，重新登录。
         st.warning("登录状态已失效，请重新登录。")
         st.stop()
     storage.set_current_uid(uid or "local")
+
+    # 待执行动作（新建/删除会话）要在渲染与存储读写之前处理：它们会改
+    # current_session，而回调里的这类变更会被 Streamlit 回滚，导致删了还在。
+    # 注意必须放在 set_current_uid **之后**（见上）。
+    sessions.run_pending_actions()
+
     # 同一个浏览器换了账号时，清掉上一个账号的会话态，避免界面串位
     # （磁盘上的数据本来就按用户隔离，这里只是不让内存里的旧会话"接着显示"）
     if st.session_state.get("_uid") not in (None, uid):

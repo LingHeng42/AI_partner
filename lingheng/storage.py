@@ -314,6 +314,15 @@ def status() -> dict:
     try:
         collection = _client()[MONGO_DB_NAME][MONGO_COLLECTION]
         info["documents"] = collection.count_documents({"uid": current_uid()})
+        # 列出库里所有"用户分区"及各自文档数。
+        # 为什么必须显示：写入若发生在用户名设置之前（_state.uid 默认是 "local"），
+        # 数据会落进 users/local/ 这个不属于任何人的分区 —— 表现是"界面里有会话、
+        # 但在自己账号下查不到、删除也报 0 个键"。只看当前用户的文档数发现不了，
+        # 必须把全部分区摊开来看（真踩过）。
+        counts = {}
+        for doc in collection.aggregate([{"$group": {"_id": "$uid", "n": {"$sum": 1}}}]):
+            counts[str(doc["_id"])] = doc["n"]
+        info["partitions"] = counts
     except Exception as exc:  # noqa: BLE001 - 连不上要把原因显示出来，而不是静默降级
         info["ok"] = False
         info["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
