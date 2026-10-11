@@ -621,6 +621,12 @@ def delete_session(session_name: str) -> None:
     Streamlit 会回滚控件回调里的 session_state 变更，如果在回调里把
     current_session 换成新 ID，重跑后它会变回被删除的那条，于是应用又把它
     当成一个空会话显示出来（表现：删除了但按钮不消失、点进去是空的）。
+
+    **本函数不调用 st.rerun()**，这是刻意的：``st.rerun()`` 是靠**抛异常**中断
+    脚本的。而本函数是在主脚本**一开头**（run_pending_actions）被调用的，
+    一旦在这里 rerun，后面的渲染全部来不及执行 —— 表现就是"每次删除/切换会话后
+    页面空白"。同样的做法还会被下面自己的 ``except Exception`` 抓住、串成多层
+    rerun。交给调用方决定重跑时机（pending 路由里在函数返回后再 rerun）。
     """
     try:
         storage.delete_prefix(store._session_dir(session_name))
@@ -638,8 +644,6 @@ def delete_session(session_name: str) -> None:
             st.session_state.current_branch = "main"
     except Exception as e:  # noqa: BLE001
         st.error(f"删除会话失败: {e}")
-        return
-    st.rerun()  # 刷新页面
 
 
 # --------------------------------------------------------------------------- #
@@ -686,30 +690,39 @@ def request_new_session() -> None:
 def run_pending_actions() -> None:
     """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。
 
-    这里**故意不往上抛异常**：本函数在渲染之前运行，一旦抛出，整页（包括侧边栏的
-    「最近动作」排查面板）都不会渲染，用户只看到空白页 —— 恰好把最有用的诊断信息
-    藏掉了。删除/新建失败时改为记录动作并继续渲染，由 delete_session 自己弹 st.error。
+    执行完**一定要 rerun 一次**：此时 current_session 已经换了（或消息已重置），
+    而本函数在渲染之前运行，必须重新跑一遍脚本才能按新状态画页面。
+
+    重跑必须由**这里**显式发起，不要下沉进 delete_session/new_session ——
+    ``st.rerun()`` 是靠**抛异常**中断脚本的，放在被本函数调用的下层，就会在
+    主脚本一开头把后面的渲染全部掐掉，表现是"每次删除/切换会话后页面空白"
+    （线上真踩过：面板只记到"发现待办"，永远没有"已执行"）。
+
+    异常在这里吞掉并显示 st.error，而不是往上抛：本函数在渲染之前运行，
+    抛出会让整页（包括排查面板）都不渲染，恰好把最有用的诊断信息藏掉。
     """
     target = st.session_state.get(PENDING_DELETE)
     pending_new = st.session_state.get(PENDING_NEW)
-    if target or pending_new:
-        note_action(f"主脚本：发现待办 delete={target!r} new={bool(pending_new)}")
+    if not target and not pending_new:
+        return
+    note_action(f"主脚本：发现待办 delete={target!r} new={bool(pending_new)}")
     if target:
         st.session_state[PENDING_DELETE] = None
         try:
-            delete_session(target)      # 成功时内部会 st.rerun()，后面的代码不会执行
+            delete_session(target)
         except Exception as exc:  # noqa: BLE001
             note_action(f"主脚本：删除 {target} 失败 {type(exc).__name__}: {exc}")
             st.error(f"删除会话失败：{type(exc).__name__}: {exc}")
-            return
-        note_action(f"主脚本：删除 {target} 已执行")
-        return
-    if pending_new:
+        else:
+            note_action(f"主脚本：删除 {target} 已执行")
+    elif pending_new:
         st.session_state[PENDING_NEW] = None
         try:
             new_session()
         except Exception as exc:  # noqa: BLE001
             note_action(f"主脚本：新建会话失败 {type(exc).__name__}: {exc}")
             st.error(f"新建会话失败：{type(exc).__name__}: {exc}")
-            return
-        note_action("主脚本：新建会话已执行")
+        else:
+            note_action("主脚本：新建会话已执行")
+    # 用新状态重新画一遍页面（这里是发起重跑的唯一位置）
+    st.rerun()

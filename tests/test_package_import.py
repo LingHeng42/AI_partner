@@ -168,6 +168,47 @@ for py in sorted(PACKAGE.glob("*.py")) + [PROJECT / "AI_partner.py"]:
             offenders.append(f"{py.name}: {pattern}")
 check("没有对 session_state 用属性式访问（pop/setdefault/update）", not offenders, offenders)
 
+# --------------------------------------------------------------------------- #
+# 3.6 st.rerun() 不能出现在主脚本开头调用的下层函数里
+#
+# 线上事故：delete_session 内部有 st.rerun()，而它是在主脚本**一开头**
+# （run_pending_actions）被调用的。st.rerun() 靠**抛异常**中断脚本，于是在主脚本
+# 刚开头就把后面的渲染全部掐掉 —— 表现是"每次删除/切换会话后页面空白"。
+# 更隐蔽的是它还会被自己的 except Exception 抓住、串成多层 rerun。
+# 诊断面板只记到"主脚本：发现待办"，永远没有"已执行"，一眼就能看出没返回。
+#
+# 规矩：**重跑只能由 run_pending_actions 发起**，被它调用的 delete_session /
+# new_session 里绝不能有 st.rerun()。
+# --------------------------------------------------------------------------- #
+import ast as _ast  # noqa: E402
+
+GUARDED = {"delete_session": "sessions.py", "new_session": "sessions.py"}
+rerun_offenders = []
+for func_name, file_name in GUARDED.items():
+    tree = _ast.parse((PACKAGE / file_name).read_text(encoding="utf-8"))
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == func_name:
+            for sub in _ast.walk(node):
+                if (isinstance(sub, _ast.Call)
+                        and isinstance(sub.func, _ast.Attribute)
+                        and sub.func.attr == "rerun"):
+                    rerun_offenders.append(f"{file_name}:{sub.lineno} {func_name}() 里有 st.rerun()")
+check("主脚本开头调用的 delete_session/new_session 里没有 st.rerun()（会掐断渲染）",
+      not rerun_offenders, rerun_offenders)
+
+# 反过来：run_pending_actions 必须显式发起一次重跑，否则页面画的是旧状态
+tree = _ast.parse((PACKAGE / "sessions.py").read_text(encoding="utf-8"))
+pending_has_rerun = False
+for node in _ast.walk(tree):
+    if isinstance(node, _ast.FunctionDef) and node.name == "run_pending_actions":
+        pending_has_rerun = any(
+            isinstance(sub, _ast.Call)
+            and isinstance(sub.func, _ast.Attribute)
+            and sub.func.attr == "rerun"
+            for sub in _ast.walk(node)
+        )
+check("run_pending_actions 执行完会重跑一次（用新状态重画）", pending_has_rerun)
+
 # 最终验证：**完整导入入口**（含全部子模块与代理导出），不触发页面渲染。
 # 这一步是"Python 3.12 本地也能抓住那个事故"的关键：如果 lingheng 退化成
 # namespace package、或者导入顺序不对，这里就会报 KeyError / circular import。
