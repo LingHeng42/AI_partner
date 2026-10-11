@@ -51,8 +51,20 @@ def set_current_uid(uid: str) -> None:
     Streamlit 每个会话跑在自己的线程里，所以用 threading.local 是安全的：
     另一个用户的请求不会看到这个值。未设置时（纯逻辑测试、脚本调用）退化成
     "local" 用户，这样本地单独跑某个函数也不会炸。
+
+    同时负责维护**本次渲染的读缓存**：
+    - 换了用户 → 清空（绝不能把上一个用户的数据留在缓存里）
+    - 换了存档根目录 → 清空（测试会在隔离目录与默认目录之间切换）
+    缓存只在一次脚本运行内有效，下一次重跑必须重新读盘。
     """
     _state.uid = str(uid or "").strip() or "local"
+    base = str(config.archive_dir())
+    if getattr(_state, "memo_base", None) != base or getattr(_state, "memo_uid", None) != _state.uid:
+        _state.memo = {}
+        _state.memo_base = base
+        _state.memo_uid = _state.uid
+    # 每次脚本运行都重新计数：侧边栏显示的是"本次渲染发起了几次存储请求"
+    _state.requests = 0
 
 
 def current_uid() -> str:
@@ -93,6 +105,9 @@ class LocalBackend:
     def get(self, rel: str) -> bytes:
         p = self.path(rel)
         return p.read_bytes() if p.exists() else b""
+
+    def read_many(self, rels: list) -> dict:
+        return {rel: self.get(rel) for rel in rels}
 
     def put(self, rel: str, data: bytes) -> None:
         p = self.path(rel)
@@ -153,10 +168,12 @@ class MongoBackend:
 
     kind = MONGO_BACKEND
 
-    def __init__(self, client, uid: str):
+    def __init__(self, client, uid: str, ensure_index: bool = True):
         self.collection = client[MONGO_DB_NAME][MONGO_COLLECTION]
         self.uid = _safe(uid)
-        self.collection.create_index([("uid", 1), ("key", 1)], unique=True)
+        if ensure_index:
+            # 建索引本身是一次网络往返，而且服务端是幂等的；每次渲染做一次就够
+            self.collection.create_index([("uid", 1), ("key", 1)], unique=True)
 
     def _key(self, rel: str) -> str:
         return f"users/{self.uid}/" + _norm(rel)
@@ -164,6 +181,14 @@ class MongoBackend:
     def get(self, rel: str) -> bytes:
         doc = self.collection.find_one({"uid": self.uid, "key": self._key(rel)})
         return bytes(doc["data"]) if doc else b""
+
+    def read_many(self, rels: list) -> dict:
+        """一次 ``$in`` 查询读多个文件（列表页从 N 次往返降到 1 次）。"""
+        keys = {self._key(rel): rel for rel in rels}
+        found = {}
+        for doc in self.collection.find({"uid": self.uid, "key": {"$in": list(keys)}}):
+            found[keys[doc["key"]]] = bytes(doc["data"])
+        return {rel: found.get(rel, b"") for rel in rels}
 
     def put(self, rel: str, data: bytes) -> None:
         self.collection.update_one(
@@ -292,6 +317,141 @@ def _client():
     return client
 
 
+def _memo() -> dict:
+    """本次渲染的读缓存（见 cached 的说明）。"""
+    memo = getattr(_state, "memo", None)
+    if memo is None:
+        memo = {}
+        _state.memo = memo
+    return memo
+
+
+def bump_requests() -> None:
+    """记一次真实的存储请求（缓存未命中的那些）。
+
+    侧边栏会显示"本次渲染发起了几次请求"。这是判断"慢在哪"最直接的指标：
+    每次请求在 MongoDB 上都是一次网络往返，几十次就是肉眼可见的卡顿。
+    """
+    _state.requests = getattr(_state, "requests", 0) + 1
+
+
+def request_count() -> int:
+    return getattr(_state, "requests", 0)
+
+
+class _CachedBackend:
+    """给后端套一层"一次渲染内只读一次"的缓存。
+
+    为什么需要：一个文件在一次渲染里会被反复读（列表要读每个会话的 meta、
+    元信息读一次、头像再读一次……）。逐个文件请求在 MongoDB 上就是一次网络往返，
+    实测一次渲染会产生 32 次请求 —— 按 200ms 算就是 6 秒多的白等。
+
+    安全性：缓存只在**一次脚本运行内**有效（``set_current_uid`` 每次重跑都会清空），
+    并且按 ``(用户, 后端, 路径)`` 分别记；写/删会同步更新缓存，所以同一次运行里
+    "写完再读"也能读到最新值。
+    """
+
+    def __init__(self, inner, key_prefix: str):
+        self._inner = inner
+        self._prefix = key_prefix
+
+    def _key(self, op: str, rel: str) -> str:
+        return f"{self._prefix}|{op}|{_norm(rel)}"
+
+    def path(self, rel: str):
+        return self._inner.path(rel)
+
+    @property
+    def kind(self):
+        return self._inner.kind
+
+    def _invalidate_lists(self) -> None:
+        """任何写入/删除都要作废"目录列表"缓存。
+
+        列表是按前缀缓存的（一次渲染内要反复列会话），但新增/删除文件会改变列表
+        内容。曾经漏了这一步，导致"刚保存的会话在会话历史里不出现"——因为列表
+        缓存里还是写入之前的空结果。宁可整体丢掉列表缓存，也不要读到过期列表。
+        """
+        memo = _memo()
+        for key in [k for k in memo if "|list|" in k]:
+            del memo[key]
+
+    def get(self, rel: str) -> bytes:
+        memo = _memo()
+        cache_key = self._key("get", rel)
+        if cache_key in memo:
+            return memo[cache_key]
+        bump_requests()
+        value = self._inner.get(rel)
+        memo[cache_key] = value
+        return value
+
+    def put(self, rel: str, data: bytes) -> None:
+        bump_requests()
+        self._inner.put(rel, data)
+        memo = _memo()
+        memo[self._key("get", rel)] = bytes(data)
+        memo[self._key("exists", rel)] = True
+        self._invalidate_lists()
+
+    def exists(self, rel: str) -> bool:
+        memo = _memo()
+        cache_key = self._key("exists", rel)
+        if cache_key in memo:
+            return memo[cache_key]
+        bump_requests()
+        value = self._inner.exists(rel)
+        memo[cache_key] = value
+        return value
+
+    def list(self, prefix: str) -> list:
+        memo = _memo()
+        cache_key = self._key("list", prefix)
+        if cache_key in memo:
+            return memo[cache_key]
+        bump_requests()
+        value = self._inner.list(prefix)
+        memo[cache_key] = value
+        return value
+
+    def read_many(self, rels: list) -> dict:
+        """一次读多个文件，返回 ``{相对路径: 字节}``（缺失的为 b""）。
+
+        列表页要读每个会话的 meta。逐个读在 MongoDB 上就是 N 次网络往返，
+        用一次 ``$in`` 查询代替（见 MongoBackend.read_many）。
+        """
+        memo = _memo()
+        result = {}
+        missing = []
+        for rel in rels:
+            cache_key = self._key("get", rel)
+            if cache_key in memo:
+                result[rel] = memo[cache_key]
+            else:
+                missing.append(rel)
+        if missing:
+            bump_requests()
+            fetched = self._inner.read_many(missing)
+            for rel, value in fetched.items():
+                memo[self._key("get", rel)] = value
+                result[rel] = value
+        return result
+
+    def delete(self, rel: str) -> None:
+        bump_requests()
+        self._inner.delete(rel)
+        memo = _memo()
+        memo[self._key("get", rel)] = b""
+        memo[self._key("exists", rel)] = False
+        self._invalidate_lists()
+
+    def delete_prefix(self, prefix: str) -> int:
+        bump_requests()
+        count = self._inner.delete_prefix(prefix)
+        _state.memo = {}  # 删了一片，缓存整体作废最省心
+        return count
+
+
 def active():
     """当前生效的后端。
 
@@ -302,12 +462,22 @@ def active():
     "历史记录不见了"，完全查不出原因。宁可明确报错。
     """
     if using_mongo():
+        # 每次渲染只建立/校验一次连接：active() 在一次运行里会被调用几十次，
+        # 每次都 ping + 建索引就是白白多出几十个网络往返（实测这是主要开销之一）。
+        ready = getattr(_state, "mongo_ready", None)
+        uri = mongo_uri()
+        prefix = f"mongo:{uri}:{current_uid()}"
+        if ready == uri:
+            return _CachedBackend(MongoBackend(_client(), current_uid(), ensure_index=False), prefix)
         try:
             backend = MongoBackend(_client(), current_uid())
             # 构造后端时就会建索引，连不上会在这里抛；再 ping 一次确认真的通
             backend.collection.database.client.admin.command("ping")
             _state.mongo_error = None
-            return backend
+            _state.mongo_ready = uri
+            return _CachedBackend(backend, prefix)
+        except RuntimeError:
+            raise
         except Exception as exc:  # noqa: BLE001
             message = (
                 f"MongoDB 连接失败（{type(exc).__name__}: {str(exc)[:180]}）。\n\n"
@@ -324,7 +494,10 @@ def active():
                 _state.mongo_error = message
                 print(f"[storage] {message}", file=sys.stderr, flush=True)
             raise RuntimeError(message) from exc
-    return LocalBackend(config.archive_dir())
+    # 缓存键里带上存档根目录：根目录变了（测试会在隔离目录与默认目录之间切换）
+    # 就不能复用旧结果，否则会读到另一个目录的列表。
+    base = config.archive_dir()
+    return _CachedBackend(LocalBackend(base), f"local:{base}:{current_uid()}")
 
 
 def backend_kind() -> str:
@@ -351,6 +524,21 @@ def write_json(rel: str, data) -> None:
 
 def read_bytes(rel: str) -> bytes:
     return active().get(rel)
+
+
+def read_json_many(rels: list) -> dict:
+    """一次读多个 JSON 文件，返回 ``{相对路径: 解析后的值}``（缺失/坏文件为 None）。"""
+    raw = active().read_many(list(rels))
+    out = {}
+    for rel, payload in raw.items():
+        if not payload:
+            out[rel] = None
+            continue
+        try:
+            out[rel] = json.loads(payload.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            out[rel] = None
+    return out
 
 
 def write_bytes(rel: str, data: bytes) -> None:

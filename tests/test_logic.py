@@ -686,7 +686,11 @@ check("不存在的会话名回退成自身", app.session_title("no-such-session
 # 当前会话在磁盘上，因此正常出现在列表里
 check("多会话按时间倒序", app.load_session_list() == ["3000-01-01_000000_000", "2026-01-01_120000_000", "2000-01-01_000000_000"],
       app.load_session_list())
-blank_title.unlink()
+# 删除要走存储层（storage.delete），它会把本次渲染的读缓存一起作废；
+# 直接用 Path.unlink() 绕过存储层的话，缓存会继续给出旧结果。
+app.storage.delete(app._legacy_key("3000-01-01_000000_000"))
+check("删掉旧扁平文件后它不再出现在列表里",
+      "3000-01-01_000000_000" not in app.load_session_list(), app.load_session_list())
 
 # 新开、还没发言的会话（没有文件）不应出现在会话历史里
 app.st.session_state["current_session"] = "2999-12-31_235959_999"

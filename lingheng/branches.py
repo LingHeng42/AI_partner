@@ -99,12 +99,16 @@ def rename_branch(session_name: str, branch_id: str, new_id: str = None, input_k
             if storage.exists(new_path):
                 st.error(f"分支文件已存在：{new_id}.json")
                 return
-            # 本地后端可以直接改名；远程后端（MongoDB）只能复制一份再删旧的
-            if storage.backend_kind() == "local":
-                os.replace(storage.active().path(old_path), storage.active().path(new_path))
-            else:
-                storage.write_json(new_path, storage.read_json(old_path, {}) or {})
-                storage.delete(old_path)
+            # 统一走存储层"复制 + 删旧的"：两个后端同一条路径，而且会让存储层的
+            # 读缓存正确失效。曾经为了省一次拷贝对本地后端特判 os.replace() 直接改
+            # 磁盘——那会绕过缓存，导致紧接着的 storage.exists(new_path) 拿到改名前的
+            # False，"删除分支"就被静默跳过了。
+            payload = storage.read_json(old_path, None)
+            if payload is None:
+                st.error(f"分支文件读不出来，改名已取消：{new_id}.json")
+                return
+            storage.write_json(new_path, payload)
+            storage.delete(old_path)
         for item in items:
             if item["id"] == branch_id:
                 item["id"] = new_id

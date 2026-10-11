@@ -93,6 +93,9 @@ def _render_storage_status(username: str = None) -> None:
     """
     info = storage.status()
     with st.expander("存储", expanded=not info["ok"], icon=":material/database:"):
+        # 请求数是判断"慢在哪"最直接的指标：每次请求在 MongoDB 上都是一次网络往返。
+        # 正常一次渲染应该在 20 次以内（一次渲染内的读缓存会去重）。
+        requests = storage.request_count()
         if info["mode"] == storage.MONGO_BACKEND:
             st.caption("会话存在 MongoDB（跨重启保留）")
             if info["uri"]:
@@ -101,6 +104,8 @@ def _render_storage_status(username: str = None) -> None:
                 st.caption(f"当前用户：{username}")
             if info["documents"] is not None:
                 st.caption(f"这个账号名下有 {info['documents']} 个文档")
+            st.caption(f"本次渲染发起 {requests} 次存储请求"
+                       + ("（偏多，可能会话数量较大）" if requests > 60 else ""))
         else:
             st.warning(
                 "会话存在**容器本地文件**里。Streamlit Cloud 上本地文件"
@@ -109,6 +114,7 @@ def _render_storage_status(username: str = None) -> None:
             )
             if info["secrets_error"]:
                 st.caption(f"读取 secrets 的情况：{info['secrets_error']}")
+            st.caption(f"本次渲染发起 {requests} 次存储请求（本地文件，不是瓶颈）")
         if not info["ok"]:
             st.error(f"**MongoDB 连不上**：{info['error']}")
 
