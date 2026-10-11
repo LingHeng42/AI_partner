@@ -122,17 +122,23 @@ def _render_storage_status(username: str = None) -> None:
         if auth.SECRETS_ERROR and auth.auth_enabled():
             st.caption(f"读取 secrets 的情况：{auth.SECRETS_ERROR}")
 
-        # 最近的动作：排查"点了删除/新建没反应"这类问题时，一眼就能看出
-        # "回调有没有触发"和"待办有没有被执行"。
+
+def _render_activity_log() -> None:
+    """侧边栏：最近动作 + 当前会话指针。
+
+    **默认展开**：排查"点了删除/新建没反应"时，这是唯一能看出"回调有没有触发"
+    和"待办有没有执行"的地方。之前把它塞在「存储」折叠面板里，结果排查时
+    根本找不到（真踩过）—— 诊断信息必须显眼。
+    """
+    with st.expander("排查：最近动作", expanded=True, icon=":material/bug_report:"):
         st.caption(f"当前会话指针：{st.session_state.get('current_session')}")
-        with st.expander("最近动作（排查用）", expanded=False):
-            recent = sessions.RECENT_ACTIONS
-            if recent:
-                st.code("\n".join(recent), language="text")
-            else:
-                st.caption("（还没有记录到动作）")
-            st.caption("点「删除」后应当先出现「回调：登记删除」，"
-                       "紧接着的下一次重跑再出现「主脚本：删除…已执行」。")
+        recent = sessions.RECENT_ACTIONS
+        if recent:
+            st.code("\n".join(recent), language="text")
+        else:
+            st.caption("（还没有记录到动作）")
+        st.caption("点「删除」后应先出现「回调：登记删除」，"
+                   "紧接着的下一次重跑再出现「主脚本：删除…已执行」。")
 
 def _render_key_input(state_key: str = None) -> None:
     """侧边栏里让用户填/改自己的 Key（登录后也能随时改）。"""
@@ -150,8 +156,27 @@ def _render_key_input(state_key: str = None) -> None:
             st.rerun()
 
 
+def _render_boot_marker() -> None:
+    """在侧边栏最顶上放一行"存活标记"。
+
+    用途只有一个：**分辨"应用没跑起来"和"跑起来了但某块没渲染"**。
+    线上排查时这最关键 —— 看不到任何东西时，无法判断是崩溃、卡住，还是只是
+    没找到对应面板。有这一行就能立刻区分。
+
+    同时显示**代码版本**：线上到底跑的是哪一版经常是排查的关键（曾经出现过
+    "明明推了新代码、但页面上还是旧行为"）。
+    """
+    import datetime
+
+    from lingheng import _deploy_stamp
+
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    st.caption(f":material/check_circle: 应用已加载 · 版本 {_deploy_stamp.VERSION} · {now}")
+
+
 def main() -> None:
     _page_config()
+    _render_boot_marker()    # 存活标记：先证明"应用跑起来了"
     _render_login()          # 第一道门：你是谁（未配置登录时直接放行）
     _render_api_key_gate()   # 第二道门：用谁的 key
 
@@ -254,6 +279,7 @@ def main() -> None:
             if st.button("退出登录", width="stretch", icon=":material/logout:"):
                 auth.do_logout()
         _render_storage_status(user.get("username") if auth.auth_enabled() else None)
+        _render_activity_log()   # 默认展开，排查"点了没反应"用
         _render_api_key_status()
         _render_key_input()
 
