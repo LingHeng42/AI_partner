@@ -541,6 +541,18 @@ def is_fresh_session() -> bool:
     return not session_file_exists()
 
 def load_selected_session(session_name: str) -> None:
+    """切换到某条会话：把人设、参数、头像、消息、分支指针全部换成它的。
+
+    **本函数不调用 st.rerun()**（由 run_pending_actions 统一发起），原因和
+    delete_session 一样：st.rerun() 靠抛异常中断脚本，放在主脚本开头调用的下层
+    会把后面的渲染全部掐掉。
+
+    更要紧的是**必须走两段式**（按钮回调只登记、主脚本体里执行）：
+    本函数会改 current_session / message 等 8 处状态，而 Streamlit 会回滚回调里的
+    session_state 变更 —— 直接当回调用的话，重跑后 current_session 会变回旧的，
+    主区域于是继续显示上一个会话的内容（表现：点了历史会话，按钮没变化、
+    或者变了但对话内容不对，接着发消息还会写进错误的会话）。
+    """
     try:
         has_archive = _session_exists(session_name)
         draft = draft_path(session_name)
@@ -580,7 +592,7 @@ def load_selected_session(session_name: str) -> None:
     except Exception as e:  # noqa: BLE001 - 单个存档损坏不应中断整个页面
         st.error(f"加载会话失败: {e}")
         return
-    st.rerun()  # 刷新页面
+
 
 def _reset_advanced() -> None:
     """把高级生成参数恢复成默认值（新建/删除会话时用）。"""
@@ -663,6 +675,10 @@ def delete_session(session_name: str) -> None:
 # --------------------------------------------------------------------------- #
 PENDING_DELETE = "_pending_delete"
 PENDING_NEW = "_pending_new_session"
+PENDING_LOAD = "_pending_load_session"
+PENDING_BRANCH = "_pending_switch_branch"
+PENDING_BRANCH_DELETE = "_pending_delete_branch"
+PENDING_BRANCH_RENAME = "_pending_rename_branch"
 
 # 最近发生的动作，用来在界面上排查"点了没反应"这类问题。
 # 存在模块级（不是 session_state）里，所以不会受回调状态回滚影响。
@@ -694,25 +710,71 @@ def request_new_session() -> None:
     note_action("回调：登记新建会话")
 
 
+def request_load_session(session_name: str) -> None:
+    """「切换到这条会话」按钮的回调：只登记，实际加载交给主脚本体。
+
+    为什么不能直接调 load_selected_session：它会改 current_session / message 等
+    8 处状态，而回调里的 session_state 变更会被 Streamlit 回滚 —— 重跑后
+    current_session 变回旧值，主区域继续显示上一个会话（真踩过）。
+    """
+    st.session_state[PENDING_LOAD] = session_name
+    note_action(f"回调：登记切换会话 {session_name}")
+
+
+def request_switch_branch(session_name: str, branch_id: str) -> None:
+    """「切换到这条分支」按钮的回调：只登记，实际切换交给主脚本体。
+
+    同样是因为 branches.switch_branch 会改 st.session_state.current_branch，
+    回调里改会被回滚 —— 表现是点了分支没反应、内容不对。
+    连当前会话也要记下来：分支必须切到"当时那一条会话"的分支上。
+    """
+    st.session_state[PENDING_BRANCH] = (session_name, branch_id)
+    note_action(f"回调：登记切换分支 {session_name} / {branch_id}")
+
+
+def request_delete_branch(session_name: str, branch_id: str) -> None:
+    """「删除分支」按钮的回调：只登记（delete_branch 会改 current_branch）。"""
+    st.session_state[PENDING_BRANCH_DELETE] = (session_name, branch_id)
+    note_action(f"回调：登记删除分支 {session_name} / {branch_id}")
+
+
+def request_rename_branch(session_name: str, branch_id: str, input_key: str) -> None:
+    """「重命名分支」输入框的 on_change 回调：只登记（改名会改 current_branch）。"""
+    new_id = (st.session_state.get(input_key) or "").strip()
+    if not new_id or new_id == branch_id:
+        return
+    st.session_state[PENDING_BRANCH_RENAME] = (session_name, branch_id, new_id)
+    note_action(f"回调：登记重命名分支 {branch_id} -> {new_id}")
+
+
 def run_pending_actions() -> None:
     """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。
 
     执行完**一定要 rerun 一次**：此时 current_session 已经换了（或消息已重置），
     而本函数在渲染之前运行，必须重新跑一遍脚本才能按新状态画页面。
 
-    重跑必须由**这里**显式发起，不要下沉进 delete_session/new_session ——
-    ``st.rerun()`` 是靠**抛异常**中断脚本的，放在被本函数调用的下层，就会在
-    主脚本一开头把后面的渲染全部掐掉，表现是"每次删除/切换会话后页面空白"
-    （线上真踩过：面板只记到"发现待办"，永远没有"已执行"）。
+    重跑必须由**这里**显式发起，不要下沉进 delete_session / new_session /
+    load_selected_session —— ``st.rerun()`` 是靠**抛异常**中断脚本的，放在被本函数
+    调用的下层，就会在主脚本一开头把后面的渲染全部掐掉，表现是"每次操作后页面
+    空白"（线上真踩过：面板只记到"发现待办"，永远没有"已执行"）。
 
     异常在这里吞掉并显示 st.error，而不是往上抛：本函数在渲染之前运行，
     抛出会让整页（包括排查面板）都不渲染，恰好把最有用的诊断信息藏掉。
     """
     target = st.session_state.get(PENDING_DELETE)
     pending_new = st.session_state.get(PENDING_NEW)
-    if not target and not pending_new:
+    load_target = st.session_state.get(PENDING_LOAD)
+    branch_target = st.session_state.get(PENDING_BRANCH)
+    branch_delete = st.session_state.get(PENDING_BRANCH_DELETE)
+    branch_rename = st.session_state.get(PENDING_BRANCH_RENAME)
+    if not (target or pending_new or load_target or branch_target
+            or branch_delete or branch_rename):
         return
-    note_action(f"主脚本：发现待办 delete={target!r} new={bool(pending_new)}")
+    note_action(
+        f"主脚本：发现待办 delete={target!r} new={bool(pending_new)} "
+        f"load={load_target!r} branch={branch_target!r} "
+        f"rm_branch={branch_delete!r} rename={branch_rename!r}"
+    )
     if target:
         st.session_state[PENDING_DELETE] = None
         try:
@@ -731,5 +793,60 @@ def run_pending_actions() -> None:
             st.error(f"新建会话失败：{type(exc).__name__}: {exc}")
         else:
             note_action("主脚本：新建会话已执行")
+    elif load_target:
+        st.session_state[PENDING_LOAD] = None
+        try:
+            load_selected_session(load_target)
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：切换会话 {load_target} 失败 {type(exc).__name__}: {exc}")
+            st.error(f"切换会话失败：{type(exc).__name__}: {exc}")
+        else:
+            note_action(f"主脚本：已切换到会话 {load_target}")
+    elif branch_target:
+        st.session_state[PENDING_BRANCH] = None
+        branch_session, branch_id = branch_target
+        try:
+            # 局部导入：branches 依赖 sessions，模块顶层互相导入会成环
+            from . import branches as branches_module
+
+            branches_module.switch_branch(branch_session, branch_id)
+            # switch_branch 只改指针不读内容，这里显式把消息换成分支内容，
+            # 否则主区域还是上一条分支的对话（切分支"没反应"就是这么来的）
+            if branch_session == st.session_state.get("current_session"):
+                st.session_state.message = read_branch(branch_session, branch_id).get("message", [])
+                mark_message_owner(branch_session, branch_id)
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：切换分支失败 {type(exc).__name__}: {exc}")
+            st.error(f"切换分支失败：{type(exc).__name__}: {exc}")
+        else:
+            note_action(f"主脚本：已切换到分支 {branch_id}")
+    elif branch_delete:
+        st.session_state[PENDING_BRANCH_DELETE] = None
+        branch_session, branch_id = branch_delete
+        try:
+            from . import branches as branches_module
+
+            branches_module.delete_branch(branch_session, branch_id)
+            if branch_session == st.session_state.get("current_session"):
+                current = st.session_state.get("current_branch") or "main"
+                st.session_state.message = read_branch(branch_session, current).get("message", [])
+                mark_message_owner(branch_session, current)
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：删除分支失败 {type(exc).__name__}: {exc}")
+            st.error(f"删除分支失败：{type(exc).__name__}: {exc}")
+        else:
+            note_action(f"主脚本：已删除分支 {branch_id}")
+    elif branch_rename:
+        st.session_state[PENDING_BRANCH_RENAME] = None
+        branch_session, branch_id, new_id = branch_rename
+        try:
+            from . import branches as branches_module
+
+            branches_module.rename_branch(branch_session, branch_id, new_id=new_id)
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：重命名分支失败 {type(exc).__name__}: {exc}")
+            st.error(f"重命名分支失败：{type(exc).__name__}: {exc}")
+        else:
+            note_action(f"主脚本：分支已重命名为 {new_id}")
     # 用新状态重新画一遍页面（这里是发起重跑的唯一位置）
     st.rerun()

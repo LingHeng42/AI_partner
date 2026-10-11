@@ -352,7 +352,7 @@ def main() -> None:
                     key=f"session_{session}",
                     help=f"会话 ID：{session}",
                     type="primary" if current else "secondary",
-                    on_click=lambda s=session: sessions.load_selected_session(s),
+                    on_click=lambda s=session: sessions.request_load_session(s),
                 )
             with col2:
                 # 一个入口搞定：重命名 / 置顶 / 删除。
@@ -439,7 +439,7 @@ def main() -> None:
                             width="stretch",
                             type="primary" if active else "secondary",
                             help=f"分支 {branch}",
-                            on_click=branches.switch_branch,
+                            on_click=sessions.request_switch_branch,
                             args=(sid, branch),
                         )
                     with bcol2:
@@ -449,7 +449,7 @@ def main() -> None:
                                 "重命名分支",
                                 value=branch,
                                 key=f"branch_rename_{sid}_{branch}",
-                                on_change=branches.rename_branch,
+                                on_change=sessions.request_rename_branch,
                                 args=(sid, branch),
                                 kwargs={"new_id": None, "input_key": f"branch_rename_{sid}_{branch}"},
                             )
@@ -459,7 +459,7 @@ def main() -> None:
                                 width="stretch",
                                 icon=":material/delete:",
                                 disabled=len(branch_list) <= 1,
-                                on_click=branches.delete_branch,
+                                on_click=sessions.request_delete_branch,
                                 args=(sid, branch),
                             )
 

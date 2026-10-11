@@ -10,5 +10,5 @@ GitHub 的 commit 号在页面上看不见，而 Streamlit Cloud 的日志只告
 - BUILD 写这次改的是什么，便于对照
 """
 
-VERSION = "2.0.6"
-BUILD = "修复用户名设置顺序（数据写进 users/local 的根因）+ 分区诊断与迁移"
+VERSION = "2.0.7"
+BUILD = "修切换会话/切分支产生异常会话：统一改两段式执行"
