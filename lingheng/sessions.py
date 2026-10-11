@@ -611,9 +611,19 @@ def load_selected_session(session_name: str) -> None:
         has_draft = draft is not None and storage.exists(draft)
         if not has_archive and not has_draft:
             # 还没有任何存档的会话（比如刚新建的 ID）：当成全新会话，
-            # 显式重置人设与头像，避免上一个会话的设置"漏"过来
+            # 显式重置人设与头像，避免上一个会话的设置"漏"过来。
+            #
+            # 注意：**必须把 current_session 等状态也设好**（以前这里直接 return，
+            # 于是切到一条"既没存档也没草稿"的会话时切换根本不生效 ——
+            # current_session 保持旧值，界面继续显示上一个会话）。
             reset_profile()
             reset_avatar()
+            _reset_advanced()
+            st.session_state.session_title = store.DEFAULT_SESSION_TITLE
+            st.session_state.session_pinned = False
+            st.session_state.current_branch = "main"
+            mark_message_owner(session_name, "main")
+            st.session_state.current_session = session_name
             return
         if has_archive:
             meta = load_session_meta(session_name)

@@ -135,13 +135,12 @@ def _render_storage_status(username: str = None) -> None:
 
 
 def _render_activity_log() -> None:
-    """侧边栏：最近动作 + 当前会话指针。
+    """侧边栏底部：最近动作 + 当前会话指针（排查"点了删除/新建没反应"用）。
 
-    **默认展开**：排查"点了删除/新建没反应"时，这是唯一能看出"回调有没有触发"
-    和"待办有没有执行"的地方。之前把它塞在「存储」折叠面板里，结果排查时
-    根本找不到（真踩过）—— 诊断信息必须显眼。
+    外层「账号与技术信息」折叠时这里看不到，所以默认**也保持折叠**，
+    避免出现"折叠里又套一个默认展开"的怪样子；需要排查时展开外层即可。
     """
-    with st.expander("排查：最近动作", expanded=True, icon=":material/bug_report:"):
+    with st.expander("排查：最近动作", expanded=False, icon=":material/bug_report:"):
         st.caption(f"当前会话指针：{st.session_state.get('current_session')}")
         recent = sessions.RECENT_ACTIONS
         if recent:
@@ -288,17 +287,10 @@ def main() -> None:
             st.markdown("### 凌恒的酒馆")
             st.caption("AI 角色扮演聊天")
 
-        # 身份与 Key：让用户随时看清"现在用谁的额度"，并能自己改
+        # 上端只放"你每天要用的东西"：新建会话、会话历史、角色/头像/参数。
+        # 技术性的东西（存储、排查、Key、退出登录）一律收到底部折叠区，
+        # 这样侧边栏上端是干净的 —— 不用每次都在一堆诊断信息里找"新建会话"。
         user = auth.current_user()
-        if user.get("username") and auth.auth_enabled():
-            st.caption(f"已登录：{user.get('name') or user['username']}")
-            if st.button("退出登录", width="stretch", icon=":material/logout:"):
-                auth.do_logout()
-        _render_storage_status(user.get("username") if auth.auth_enabled() else None)
-        _render_activity_log()   # 默认展开，排查"点了没反应"用
-        _render_api_key_status()
-        _render_key_input()
-
         st.divider()
 
         # 新建会话：状态改动全部放在 on_click 回调里（回调先于控件实例化执行）。
@@ -565,6 +557,31 @@ def main() -> None:
                     help="单次回答（不含思考过程）的长度上限。",
                 )
             st.button("恢复默认值", width="stretch", on_click=sessions.reset_advanced_and_save)
+
+        # --------------------------------------------------------------------------- #
+        # 底部：账号与技术信息（默认折叠）
+        #
+        # 为什么放这里并折叠：这些是"偶尔才看"的东西（换 Key、查历史存在哪、
+        # 排查点按没反应、退出登录）。放在上端会把"新建会话/会话历史"挤下去，
+        # 每天都要用的东西反而要往下找。
+        #
+        # 唯一的例外：**没有可用 Key 时默认展开** —— 那时最要紧的事就是填 Key，
+        # 不该让人再展开一层去找。
+        # --------------------------------------------------------------------------- #
+        st.divider()
+        _, key_source = ai.resolve_api_key()
+        need_key = key_source == "none"
+        with st.expander("账号与技术信息", expanded=need_key, icon=":material/settings:"):
+            if user.get("username") and auth.auth_enabled():
+                st.caption(f"已登录：{user.get('name') or user['username']}")
+                if st.button("退出登录", width="stretch", icon=":material/logout:"):
+                    auth.do_logout()
+            # Key 相关放最前（最常看）：在用谁的额度、换/清除自己的 Key
+            _render_api_key_status()
+            _render_key_input()
+            # 然后是"偶尔才查"的：历史存在哪、最近动作
+            _render_storage_status(user.get("username") if auth.auth_enabled() else None)
+            _render_activity_log()
 
     # --------------------------------------------------------------------------- #
     # 对话框
