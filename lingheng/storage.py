@@ -40,9 +40,7 @@ LOCAL_BACKEND = "local"
 MONGO_BACKEND = "mongo"
 
 _state = threading.local()
-# 跨渲染共享的读缓存：{命名空间: {键: 值}}。命名空间带上用户与后端，
-# 所以绝不会把别人的数据串过来；任何写入都会整体作废（见 reset_cache）。
-_caches = {}
+# 只用于保护共享的 MongoClient 创建（不是读缓存）
 _cache_lock = threading.Lock()
 # mongodb 客户端单独存：读缓存会被写入作废，客户端不能跟着被丢掉
 _client_holder = {}
@@ -59,10 +57,13 @@ def set_current_uid(uid: str) -> None:
     每个 Streamlit 会话有自己的 session_state，但**线程可能被复用**，所以
     当前用户存在 threading.local 里，保证并发请求之间不会串。
 
-    读缓存不在这里清空：它按"用户 + 后端 + 存档根目录"分命名空间，
-    由写入操作作废（reset_cache）。这样跨交互也能复用，才真正省下网络往返。
+    同时把**本次渲染的读缓存清空**。缓存只在一次脚本运行内有效，这是刻意的：
+    跨渲染复用会看不到"别处的写入"（另一个标签页、另一个用户、或测试直接写盘），
+    表现为"刚写的会话不出现 / 删掉的还在 / 历史是旧的"。一次渲染内的去重已经够用
+    —— 会话列表页因此从 N 次请求降到 2 次，剩下的每轮只有两三次，可忽略。
     """
     _state.uid = str(uid or "").strip() or "local"
+    _state.memo = {}
     # 每次脚本运行都重新计数：侧边栏显示的是"本次渲染发起了几次存储请求"
     _state.requests = 0
 
@@ -330,10 +331,16 @@ def _client():
 
 
 def _memo() -> dict:
-    """当前用户的读缓存（跨渲染共享，见 _CachedBackend 的说明）。"""
-    key = f"{current_uid()}|{config.archive_dir()}|{mongo_uri()}"
-    with _cache_lock:
-        return _caches.setdefault(key, {})
+    """**本次渲染**的读缓存（由 set_current_uid 在每轮开始时清空）。
+
+    刻意不做跨渲染复用：那样会看不到别处的写入（另一个标签页/用户，或测试直接
+    写盘），出现"刚写的看不到、删掉的还在"。一次渲染内的去重已经足够。
+    """
+    memo = getattr(_state, "memo", None)
+    if memo is None:
+        memo = {}
+        _state.memo = memo
+    return memo
 
 
 def bump_requests() -> None:
@@ -350,12 +357,12 @@ def request_count() -> int:
 
 
 def reset_cache() -> None:
-    """清空所有用户的读缓存（任何写入都会调它）。
+    """清空本次渲染的读缓存（写入/删除后会调它，避免读到过期数据）。
 
-    宁可整体作废也不要读到过期数据：写操作远少于读操作，代价可以忽略。
+    缓存本身只活一轮渲染，但**同一次渲染里**写完再读必须看到新值，
+    所以写操作要主动作废它。
     """
-    with _cache_lock:
-        _caches.clear()
+    _state.memo = {}
 
 
 class _CachedBackend:

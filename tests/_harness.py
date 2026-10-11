@@ -27,7 +27,12 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT = TESTS_DIR.parent
-TMP_DIR = TESTS_DIR / ".tmp"
+# 临时根目录默认是 tests/.tmp。可以用 AI_PARTNER_TEST_TMP 覆盖 —— 这**不是**可选
+# 的装饰：reset_tmp() 会清空整个 TMP_DIR，所以任何"再起一个子进程来跑应用/测试"的
+# 用例都必须给子进程一个独立的根目录，否则子进程会把**父测试正在用的存档目录一起
+# 清掉**，导致同一次 run_tests.py 里后面几个套件莫名其妙地失败（真踩过：表现为会话
+# 列表渲染不出来，且失败套件每次都不一样）。
+TMP_DIR = Path(os.environ.get("AI_PARTNER_TEST_TMP") or (TESTS_DIR / ".tmp"))
 # 每次运行用独立的存档目录名：沙箱往 .tmp 里写的临时子目录带
 # `Everyone Deny DeleteSubdirectoriesAndFiles` 拒绝 ACE，在受限权限下连 icacls 都
 # 被拒（Access is denied），那层目录删不掉。用独立名字就不用依赖删除成功——
@@ -238,6 +243,11 @@ os.environ["AI_PARTNER_DISABLE_AUTH"] = "1"
 os.environ["AI_PARTNER_SESSIONS_DIR"] = str(SESSIONS_DIR)
 # 让 tempfile 也把东西放进 TMP_DIR，别在系统临时目录里留下受限 ACL 的残留
 tempfile.tempdir = str(TMP_DIR)
+# 子进程会把本目录当作自己的隔离根：**必须**显式传下去。
+# 否则子进程 import _harness 时会跑 reset_tmp()，把 tests/.tmp 整个清掉 ——
+# 而那正是父进程正在用的存档目录，于是后面几个套件的会话凭空消失。
+# 症状：会话列表渲染不出来，且失败的套件每次都不一样（真踩过，查了很久）。
+os.environ["AI_PARTNER_TEST_TMP"] = str(TMP_DIR)
 
 for _path in (str(PROJECT), str(TMP_DIR)):
     if _path not in sys.path:

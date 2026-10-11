@@ -9,7 +9,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from . import config, images, profile, storage, store
+from . import config, profile, storage, store
 
 
 
@@ -653,6 +653,19 @@ def delete_session(session_name: str) -> None:
 PENDING_DELETE = "_pending_delete"
 PENDING_NEW = "_pending_new_session"
 
+# 最近发生的动作，用来在界面上排查"点了没反应"这类问题。
+# 存在模块级（不是 session_state）里，所以不会受回调状态回滚影响。
+RECENT_ACTIONS = []
+
+
+def note_action(text: str) -> None:
+    """记一条动作日志（只保留最近若干条）。"""
+    import datetime
+
+    stamp = datetime.datetime.now().strftime("%H:%M:%S")
+    RECENT_ACTIONS.append(f"{stamp} {text}")
+    del RECENT_ACTIONS[:-12]
+
 
 def request_delete_session(session_name: str) -> None:
     """删除按钮的回调：只登记"要删哪条"，真正的删除交给主脚本体。
@@ -661,20 +674,42 @@ def request_delete_session(session_name: str) -> None:
     多调一次没有好处，反而在 AppTest 等环境下不会被执行，导致待办永远不处理。
     """
     st.session_state[PENDING_DELETE] = session_name
+    note_action(f"回调：登记删除 {session_name}")
 
 
 def request_new_session() -> None:
     """「新建会话」按钮的回调：只登记，实际切换交给主脚本体。"""
     st.session_state[PENDING_NEW] = True
+    note_action("回调：登记新建会话")
 
 
 def run_pending_actions() -> None:
-    """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。"""
+    """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。
+
+    这里**故意不往上抛异常**：本函数在渲染之前运行，一旦抛出，整页（包括侧边栏的
+    「最近动作」排查面板）都不会渲染，用户只看到空白页 —— 恰好把最有用的诊断信息
+    藏掉了。删除/新建失败时改为记录动作并继续渲染，由 delete_session 自己弹 st.error。
+    """
     target = st.session_state.get(PENDING_DELETE)
+    pending_new = st.session_state.get(PENDING_NEW)
+    if target or pending_new:
+        note_action(f"主脚本：发现待办 delete={target!r} new={bool(pending_new)}")
     if target:
         st.session_state[PENDING_DELETE] = None
-        delete_session(target)          # 内部会 st.rerun()，后面的代码不会执行
+        try:
+            delete_session(target)      # 成功时内部会 st.rerun()，后面的代码不会执行
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：删除 {target} 失败 {type(exc).__name__}: {exc}")
+            st.error(f"删除会话失败：{type(exc).__name__}: {exc}")
+            return
+        note_action(f"主脚本：删除 {target} 已执行")
         return
-    if st.session_state.get(PENDING_NEW):
+    if pending_new:
         st.session_state[PENDING_NEW] = None
-        new_session()
+        try:
+            new_session()
+        except Exception as exc:  # noqa: BLE001
+            note_action(f"主脚本：新建会话失败 {type(exc).__name__}: {exc}")
+            st.error(f"新建会话失败：{type(exc).__name__}: {exc}")
+            return
+        note_action("主脚本：新建会话已执行")

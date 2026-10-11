@@ -70,6 +70,11 @@ marker = FAKE / "callback_fired.txt"
 entry = (PROJECT / "AI_partner.py").read_text(encoding="utf-8")
 prelude = (
     "import sys\n"
+    # ⚠️ AppTest 是在**本进程内**执行这段脚本的，而 _harness（被应用路径牵连）在导入时
+    # 会 reset_tmp() 清空整个 tests/.tmp —— 也就是把本测试刚种下的会话文件删掉，
+    # 于是应用渲染出"还没有会话"，断言随机失败。先指到独立临时根，杜绝这次清空。
+    f"import os; os.environ['AI_PARTNER_TEST_TMP'] = "
+    f"{str((_harness.TMP_DIR.parent / '_apptmp').resolve()).replace(chr(92), '/')!r}\n"
     f"sys.path.insert(0, {str(PROJECT).replace(chr(92), '/')!r})\n"
     "import streamlit as st\n"
     "from lingheng import sessions as _s\n"

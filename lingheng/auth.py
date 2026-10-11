@@ -50,20 +50,35 @@ def auth_enabled() -> bool:
     return bool(_credentials_raw())
 
 
+# 上一次读取 secrets 时遇到的问题（供界面展示）。
+# 为什么必须记下来：以前这里 `except Exception: pass` 把三类完全不同的情况
+# 混成一种 —— ①没配 secrets ②secrets 文件本身有 TOML 错误 ③键名写错。
+# 后果很严重且很难查：
+#     读不到 AUTH_CREDENTIALS → auth_enabled() 为假 → **登录门控整个消失**；
+#     读不到 MONGO_URI      → 静默退回**本地文件** → 数据写进容器临时盘，
+#                             重启就"历史不见了"。
+# 而 Streamlit Cloud 的容器盘是可写的，所以本地兜底完全不报错，故障被完美掩盖。
+SECRETS_ERROR = None
+
+
 def _credentials_raw():
     """凭据表：secrets[AUTH_CREDENTIALS] / 环境变量 / 本地 auth_config.yaml。
 
     Community Cloud 上**不要**走 yaml 文件那条路：本地文件随时会被重置，
     注册/改密这类要写回文件的功能都会失效。固定名单直接配在 secrets 里最稳。
     """
+    global SECRETS_ERROR
     override = _runtime_override("AUTH_CREDENTIALS_RAW")
     if override is not None:
         return override
     try:
         if "AUTH_CREDENTIALS" in st.secrets:
+            SECRETS_ERROR = None
             return st.secrets["AUTH_CREDENTIALS"]
-    except Exception:  # noqa: BLE001 - 没配 secrets
-        pass
+        SECRETS_ERROR = "secrets 里没有 AUTH_CREDENTIALS 这一段"
+    except Exception as exc:  # noqa: BLE001
+        # 这里最常见的就是"secrets 里有别处 TOML 写错，导致整个文件读不出来"
+        SECRETS_ERROR = f"{type(exc).__name__}: {exc}"
     value = os.environ.get("AUTH_CREDENTIALS")
     if value:
         return value

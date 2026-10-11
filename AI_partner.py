@@ -30,14 +30,15 @@ import sys
 import lingheng
 
 # 顺序 = 依赖顺序（下层在前）。**不要**改成按需导入，原因见上面的说明。
+# 注意 images 必须排在 sessions 之前：images 在函数里调用 sessions.save_session。
 MODULE_ORDER = (
     "config",    # 路径与常量、默认人设、密钥与名单
     "storage",   # 存储后端（本地文件 / MongoDB）与按用户分区
     "store",     # 存储原语：会话/分支/附件的键名
     "profile",   # 人设与高级生成参数
+    "images",    # 图片与头像（依赖 sessions，所以必须在 sessions 之前）
     "sessions",  # 会话：元信息、分支文件、草稿、新建/删除
     "branches",  # 分支
-    "images",    # 图片与头像
     "auth",      # 身份：登录、当前用户、允许名单
     "ai",        # 模型调用与对话流程
     "ui",        # 页面渲染（最后，因为它依赖上面全部）

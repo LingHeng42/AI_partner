@@ -13,6 +13,7 @@ package。本地 Python 3.12 跑得好好的，但 Streamlit Community Cloud 用
 
 用法：python tests/test_package_import.py
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -53,14 +54,35 @@ def run_python(code: str, skip_ui: bool = False) -> tuple:
 
     skip_ui=True 时设置 AI_PARTNER_SKIP_UI=1，让入口只做导入与代理导出、
     不触发页面渲染（否则在测试进程里渲染会失败）。
+
+    ⚠️ 必须显式指定 UTF-8：Windows 上 ``text=True`` 会按系统编码（GBK）解码子进程
+    输出，而报错信息里含中文，会直接抛 UnicodeDecodeError 把测试本身弄崩
+    （与应用的编码无关，纯粹是测试的读法问题）。
+
+    ⚠️ 还必须给子进程一个**独立的临时根目录**（AI_PARTNER_TEST_TMP）：``_harness``
+    在被导入时会调用 ``reset_tmp()`` 清空整个 TMP_DIR。如果子进程共用父进程的
+    tests/.tmp，它会把**父测试正在用的存档目录一并清掉**，于是同一次 run_tests.py 里
+    排在后面的套件会莫名其妙失败（而且每次失败的套件都不一样，极难定位）。
     """
-    env = {**_harness.os.environ, "AI_PARTNER_DISABLE_AUTH": "1"}
+    env = {
+        **_harness.os.environ,
+        "AI_PARTNER_DISABLE_AUTH": "1",
+        # 让子进程输出 UTF-8，两端编码一致
+        "PYTHONIOENCODING": "utf-8",
+        # 子进程用**独立的临时根**（带父进程 pid，保证唯一），绝不能清掉父进程的
+        # 存档目录。若与父进程共用 tests/.tmp，子进程导入 _harness 时的 reset_tmp()
+        # 会把父测试正在用的 sessions_<pid> 一并删掉 —— 表现为同一次 run_tests.py 里
+        # 排在后面的套件随机失败，且每次失败的套件都不一样（极难定位）。
+        "AI_PARTNER_TEST_TMP": str(
+            _harness.TMP_DIR.parent / f"_child_tmp_{os.getpid()}"
+        ),
+    }
     if skip_ui:
         env["AI_PARTNER_SKIP_UI"] = "1"
     proc = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-X", "utf8", "-c", code],
         cwd=str(PROJECT), capture_output=True, text=True, timeout=120,
-        env=env,
+        env=env, encoding="utf-8", errors="replace",
     )
     return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
 

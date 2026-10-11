@@ -118,6 +118,21 @@ def _render_storage_status(username: str = None) -> None:
         if not info["ok"]:
             st.error(f"**MongoDB 连不上**：{info['error']}")
 
+        # 登录配置读不出来的话，门控会**静默失效**（谁都能进），必须显式说出来
+        if auth.SECRETS_ERROR and auth.auth_enabled():
+            st.caption(f"读取 secrets 的情况：{auth.SECRETS_ERROR}")
+
+        # 最近的动作：排查"点了删除/新建没反应"这类问题时，一眼就能看出
+        # "回调有没有触发"和"待办有没有被执行"。
+        st.caption(f"当前会话指针：{st.session_state.get('current_session')}")
+        with st.expander("最近动作（排查用）", expanded=False):
+            recent = sessions.RECENT_ACTIONS
+            if recent:
+                st.code("\n".join(recent), language="text")
+            else:
+                st.caption("（还没有记录到动作）")
+            st.caption("点「删除」后应当先出现「回调：登记删除」，"
+                       "紧接着的下一次重跑再出现「主脚本：删除…已执行」。")
 
 def _render_key_input(state_key: str = None) -> None:
     """侧边栏里让用户填/改自己的 Key（登录后也能随时改）。"""
