@@ -629,11 +629,18 @@ def delete_session(session_name: str) -> None:
     rerun。交给调用方决定重跑时机（pending 路由里在函数返回后再 rerun）。
     """
     try:
-        storage.delete_prefix(store._session_dir(session_name))
+        removed = storage.delete_prefix(store._session_dir(session_name))
+        note_action(f"删除 {session_name}：存储层报告删除 {removed} 个键")
         flat = _legacy_key(session_name)  # 兼容还没迁移的旧扁平存档
         if storage.exists(flat):
             storage.delete(flat)
+            note_action(f"删除 {session_name}：另删掉了旧扁平存档")
         discard_draft(session_name)
+        if not removed:
+            # 一个键都没删掉 = "要删的东西"和"存储里实际存在的"对不上。
+            # 这曾经是静默发生的（日志写"已执行"，数据一条没少），必须显式提示。
+            note_action(f"⚠ 删除 {session_name} 没有匹配到任何键")
+            st.warning(f"没有找到这个会话的存档（{session_name}）：可能已经被删掉了。")
         if session_name == st.session_state.get("current_session"):
             reset_profile()
             _reset_advanced()

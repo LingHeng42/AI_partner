@@ -115,6 +115,23 @@ check("保留的会话内容完好",
       == ["保留-0", "保留-1", "保留-2"])
 check("待办标记被清掉", state.get("_pending_delete") is None, state.get("_pending_delete"))
 check("自动切到了新会话", state.get("current_session") != VICTIM, state.get("current_session"))
+
+# --------------------------------------------------------------------------- #
+# 前缀边界：删 sessions/<ID> 不能误伤 sessions/<ID>xyz 这种"前缀相似"的会话。
+# 之前的实现用 $regex 前缀匹配，对转义/边界很敏感；现在改成服务端范围查询
+# （key > prefix/ 且 key < prefix0），这里把边界钉住。
+# --------------------------------------------------------------------------- #
+SIMILAR = VICTIM + "xyz"
+seed(SIMILAR, "相似")
+before_keys = db_keys()
+check("前缀相似的会话已写入", any(f"/{SIMILAR}/" in k for k in before_keys), before_keys)
+removed = storage.delete_prefix(store._session_dir(SIMILAR))
+check("删除前缀相似的会话返回 2（精确匹配，不多删）", removed == 2, removed)
+check("前缀相似的会话确实被删掉了", not [k for k in db_keys() if f"/{SIMILAR}/" in k], db_keys())
+check("保留的会话没被这次删除波及", len([k for k in db_keys() if f"/{KEEP}/" in k]) == 2, db_keys())
+
+# 删一个不存在的会话应当返回 0（而不是"假装成功"）
+check("删除不存在的会话返回 0", storage.delete_prefix(store._session_dir("2099-99-99_000000_000")) == 0)
 check("待删会话已从列表消失", VICTIM not in sessions.load_session_list(),
       sessions.load_session_list())
 check("保留的会话仍在列表里", KEEP in sessions.load_session_list(),

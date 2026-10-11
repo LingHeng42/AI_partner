@@ -205,7 +205,8 @@ class MongoBackend:
     def list(self, prefix: str) -> list:
         root = f"users/{self.uid}/"
         full = self._key(prefix) if prefix else root.rstrip("/")
-        # 用正则做前缀匹配：MongoDB 里没有目录，只有键名
+        # 用正则做前缀匹配：MongoDB 里没有目录，只有键名。
+        # 这里**必须**让服务端过滤 —— 改成客户端遍历整个集合在会话多时会明显变慢。
         import re
 
         pattern = "^" + re.escape(full) + "/"
@@ -219,11 +220,28 @@ class MongoBackend:
         self.collection.delete_many({"uid": self.uid, "key": self._key(rel)})
 
     def delete_prefix(self, prefix: str) -> int:
-        import re
+        """删除 ``prefix/`` 下的所有键，返回**真实删除条数**。
 
-        pattern = "^" + re.escape(self._key(prefix)) + "(/|$)"
-        result = self.collection.delete_many({"uid": self.uid, "key": {"$regex": pattern}})
-        return result.deleted_count
+        实现说明（线上踩过坑）：以前用 ``$regex`` + ``delete_many``，一旦正则和
+        实际键名对不上，MongoDB 会"成功地删了 0 条"，调用方却以为删掉了 ——
+        只能靠事后翻数据库才发现（日志写着"已执行"，数据一条没少）。
+
+        现在改用**服务端前缀范围查询**（字符串比大小，不用正则）：
+        ``key > prefix/`` 且 ``key < prefix0``（``0`` 是 ``/`` 的下一个字符）。
+        这样既让 MongoDB 用上索引，又不依赖任何正则转义 —— 匹配规则和
+        "键名就是 prefix 加斜杠再跟一段"完全一致。
+        """
+        target = self._key(prefix)
+        # 前缀 [target + "/", target + "0")：目标键本身（无子路径）也一并删掉
+        result = self.collection.delete_many({
+            "uid": self.uid,
+            "key": {"$gt": target, "$lt": target + "0"},
+        })
+        if result.deleted_count:
+            return result.deleted_count
+        # 兜底：目标键本身（键名恰好等于 prefix，没有子路径的情况）
+        exact = self.collection.delete_many({"uid": self.uid, "key": target})
+        return exact.deleted_count
 
 
 # --------------------------------------------------------------------------- #

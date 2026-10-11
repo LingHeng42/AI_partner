@@ -10,5 +10,5 @@ GitHub 的 commit 号在页面上看不见，而 Streamlit Cloud 的日志只告
 - BUILD 写这次改的是什么，便于对照
 """
 
-VERSION = "2.0.4"
-BUILD = "修 ui.py 的 SyntaxError（白屏第三次）+ 循环依赖 + secrets 静默失败"
+VERSION = "2.0.5"
+BUILD = "删除落到数据库：delete_prefix 改服务端范围查询 + 记真实删除条数"
