@@ -106,15 +106,50 @@ def mongo_migrate(uid: str, delete: bool, dry_run: bool) -> int:
     return moved
 
 
+def clean_empty(uid: str, delete: bool, dry_run: bool) -> int:
+    """清理"空壳会话"：没有任何消息、却还占着存档的会话。
+
+    这些通常是早期 bug 写空的历史（或者是异常路径留下的垃圾）。它们已经**不会**
+    出现在会话历史里（列表会过滤掉空会话），但存储里还留着。
+
+    注意：已经变空的会话，内容找不回来了 —— 这个命令只是把空壳清掉。
+    真要恢复内容，去 Atlas 的备份/快照里找。
+    """
+    from lingheng import sessions
+
+    storage.set_current_uid(uid)
+    empties = sessions.list_empty_sessions()
+    if not empties:
+        print("没有空壳会话。")
+        return 0
+    print(f"找到 {len(empties)} 个空壳会话：")
+    for name in empties:
+        print(f"  {name}")
+        if dry_run:
+            continue
+        if delete:
+            sessions.delete_session(name)
+            print("        已删除")
+    if not dry_run and not delete:
+        print("\n空壳仍保留。确认无误后加 --empty --delete 再跑一次清理。")
+    return len(empties)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="迁移旧会话到按用户分区的新位置")
+    parser = argparse.ArgumentParser(description="迁移/清理存档")
     parser.add_argument("--uid", default=None, help="用户名（默认：local）")
-    parser.add_argument("--delete", action="store_true", help="迁移后删除旧副本")
+    parser.add_argument("--delete", action="store_true", help="迁移后删除旧副本 / 配合 --empty 真正删除空壳")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不改动")
+    parser.add_argument("--empty", action="store_true",
+                        help="改为清理空壳会话（没有任何消息的会话）")
     args = parser.parse_args()
 
     uid = args.uid or "local"
     print(f"当前后端：{storage.backend_kind()} | 目标用户：{uid}")
+    if args.empty:
+        count = clean_empty(uid, args.delete, args.dry_run)
+        print(f"\n处理了 {count} 个空壳会话。")
+        return 0
     if storage.backend_kind() == storage.MONGO_BACKEND:
         count = mongo_migrate(uid, args.delete, args.dry_run)
     else:

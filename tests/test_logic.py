@@ -121,6 +121,13 @@ class _State:
     def get(self, key, default=None):
         return self._data.get(key, default)
 
+    def pop(self, key, default=None):
+        """真实 session_state 支持 pop（待执行动作会用到）。"""
+        return self._data.pop(key, default)
+
+    def keys(self):
+        return self._data.keys()
+
     def setdefault(self, key, default=None):
         return self._data.setdefault(key, default)
 
@@ -1294,6 +1301,58 @@ check("新建会话后对话清空", app.st.session_state["message"] == [])
 check("旧会话仍保留在磁盘", meta_of("2026-01-01_120000_000").exists())
 check("新会话发言前不落盘", not _harness.session_dir(new_id).exists())
 check("新会话发言前不出现在会话历史里", app.load_session_list() == ["2026-01-01_120000_000"], app.load_session_list())
+
+# 待办动作：按钮回调只登记，真正执行在主脚本体里。
+# 为什么必须分两段：Streamlit 会回滚回调里的 session_state 变更，如果回调里直接改
+# current_session，重跑后它会变回被删掉的那条 —— 表现就是"删了但按钮还在、点进去空白"。
+app.st.session_state["_pending_new_session"] = True
+app.run_pending_actions()
+check("待办：新建会话被执行", app.st.session_state["current_session"] != new_id,
+      app.st.session_state["current_session"])
+check("待办：执行后待办标记被清掉",
+      app.st.session_state.get("_pending_new_session") is None,
+      app.st.session_state.get("_pending_new_session"))
+
+# 删除待办：删掉一条会话，执行后它必须从列表里消失、键也没了。
+# 这正是之前出问题的地方（数据删了但按钮还在、点进去空白）。
+# 注意：用一条**专门的临时会话**做这件事，别动后面测试还要用的那条。
+victim = "2027-07-07_070707_000"
+app.st.session_state["current_session"] = victim
+app.st.session_state["message"] = [{"role": "user", "content": "待删除"}]
+app.save_session()
+check("删除前这条会话在列表里", victim in app.load_session_list(), app.load_session_list())
+
+# 另造一条"正常会话"，用来验证"删一条不会波及另一条"（正是用户报告的现象）
+bystander = "2027-08-08_080808_000"
+app.st.session_state["current_session"] = bystander
+app.st.session_state["message"] = [{"role": "user", "content": f"旁观-{i}"} for i in range(3)]
+app.save_session()
+bystander_before = [m["content"] for m in msgs_of(bystander)]
+check("旁观会话已建立且内容正常", bystander_before == ["旁观-0", "旁观-1", "旁观-2"], bystander_before)
+
+app.st.session_state["current_session"] = victim
+app.st.session_state["_pending_delete"] = victim
+app.run_pending_actions()
+check("待办：删除被执行，会话从列表消失", victim not in app.load_session_list(),
+      app.load_session_list())
+check("待办：删除后键也没了（不是留一个空壳）",
+      not app.storage.exists(app._meta_key(victim)), app.storage.session_ids())
+check("待办：删除后自动换到一个新会话",
+      app.st.session_state["current_session"] != victim,
+      app.st.session_state["current_session"])
+# 这条最关键：删除**不能**波及别的会话（用户遇到的就是这个）
+check("删除一条会话不会清空另一条",
+      [m["content"] for m in msgs_of(bystander)] == bystander_before,
+      msgs_of(bystander))
+check("旁观会话仍在历史里", bystander in app.load_session_list(), app.load_session_list())
+
+# 清掉旁观会话，避免影响后面的断言
+app.st.session_state["current_session"] = "2026-01-01_120000_000"
+app.st.session_state["message"] = []
+app.delete_session(bystander)
+check("旁观会话已清理", bystander not in app.load_session_list(), app.load_session_list())
+app.st.session_state["current_session"] = "2026-01-01_120000_000"
+app.st.session_state["message"] = []
 
 # 再次新建（连续点两次按钮）不应该产生任何空档
 import time as _time

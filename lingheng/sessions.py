@@ -190,26 +190,29 @@ def read_branch(session_name: str, branch_id: str) -> dict:
 def write_branch(session_name: str, branch_id: str, data: dict, force: bool = False) -> None:
     """写一条分支。
 
-    **防覆盖保护**：如果要把"零条消息"写到一个已经有消息的分支上，默认拒绝。
+    **防覆盖保护**：如果要把"零条消息"写到一个**已有内容**的分支上，默认拒绝。
 
     为什么把保护放在这个最底层：任何写入路径（保存会话、切换分支、编辑消息、
-    重新生成）最终都会走到这里。放在这里就不可能被新代码绕过。
-    触发条件是"静默失败导致内存里没有消息"这类事故 —— 例如读超时被当成空分支，
-    随后保存又把空内容写回磁盘，用户的对话就永久没了。
+    重新生成）最终都会走到这里，放在这里就不可能被新代码绕过。它挡住的是
+    "静默失败导致内存里没有消息"这类事故 —— 例如读超时被当成空分支，随后保存
+    又把空内容写回磁盘，用户的对话就永久没了。
+
+    判断依据是**原始内容是否存在**（而不是"里面有没有消息"）：分支文件常见内容
+    ``{"message": []}`` 是合法的空分支，第一条消息必须能写进去。
 
     真的需要清空某条分支时，显式传 ``force=True``。
-    返回 True 表示写入了。
     """
     messages = data.get("message")
     if not force and isinstance(messages, list) and not messages:
         try:
-            existing = read_branch(session_name, branch_id).get("message") or []
+            key = store.branch_path(session_name, branch_id)
+            existing_raw = storage.read_bytes(key) if storage.exists(key) else b""
         except Exception:  # noqa: BLE001 - 连"确认现有内容"都做不到时，宁可不写
             st.warning("暂时读不到这条分支的现有内容，为避免误覆盖，本次不保存。")
             return
-        if existing:
+        if existing_raw:
             st.warning(
-                "内存里没有消息，但存档里还有 —— 为避免用空内容覆盖历史，本次不保存。\n\n"
+                "内存里没有消息，但存档里还有内容 —— 为避免用空内容覆盖历史，本次不保存。\n\n"
                 "如果确实想清空这个会话，请新建一个会话。"
             )
             return
@@ -460,16 +463,57 @@ def load_session_list() -> list:
     wanted += [_legacy_key(name) for name in flat_names]
     blobs = storage.read_json_many(wanted)
     kept = {}
+    branch_of = {}
     for name in names:
         data = blobs.get(_meta_key(name))
-        if not isinstance(data, dict):
-            data = blobs.get(_legacy_key(name))  # 旧扁平存档
         if isinstance(data, dict):
             kept[name] = bool(data.get("pinned"))
+            branch_of[name] = data.get("current_branch") or "main"
+            continue
+        # 旧扁平存档：只读兼容，**不做空会话过滤**（老文件可能没有 message 字段，
+        # 那不代表它该被隐藏）。它会在下次保存时自动迁移成新结构。
+        legacy = blobs.get(_legacy_key(name))
+        if isinstance(legacy, dict):
+            kept[name] = bool(legacy.get("pinned"))
+            branch_of[name] = None
+    if not kept:
+        return []
+    # **过滤掉"空会话"**：只剩新结构会话参与判断 —— meta.json 在、但当前分支里
+    # 一条消息都没有的，不进历史。这样"被写空的会话"不会再以空白条目出现。
+    # 一次批量读回所有分支文件，不额外增加网络往返。
+    branch_names = [name for name in kept if branch_of.get(name)]
+    branch_blobs = storage.read_json_many(
+        [store.branch_path(name, branch_of[name]) for name in branch_names]
+    )
+    for name in branch_names:
+        payload = branch_blobs.get(store.branch_path(name, branch_of[name]))
+        messages = payload.get("message") if isinstance(payload, dict) else None
+        if not messages:
+            del kept[name]
     if not kept:
         return []
     # key 用字符串而非 datetime，省一次解析；会话 ID 是定长时间戳，字典序即时间序
     return sorted(kept, key=lambda n: (kept[n], n), reverse=True)
+
+
+def list_empty_sessions() -> list:
+    """列出"没有任何消息"的空壳会话（用来清理历史遗留）。
+
+    这些通常是被早期 bug 写空的历史，或者是异常路径留下的垃圾。
+    它们已经不在会话历史里显示了，但仍然占着存储。
+    """
+    empty = []
+    for name in storage.session_ids():
+        meta = storage.read_json(_meta_key(name), None)
+        if not isinstance(meta, dict):
+            empty.append(name)
+            continue
+        branch = meta.get("current_branch") or "main"
+        payload = storage.read_json(store.branch_path(name, branch), None)
+        messages = payload.get("message") if isinstance(payload, dict) else None
+        if not messages:
+            empty.append(name)
+    return sorted(empty)
 
 
 def _session_exists(session_name: str = None) -> bool:
@@ -570,7 +614,14 @@ def new_session() -> None:
 
 
 def delete_session(session_name: str) -> None:
-    """删除会话：整目录（含所有分支）与草稿一起清掉。"""
+    """删除会话：整目录（含所有分支）与草稿一起清掉。
+
+    注意：这是**真正执行删除**的函数。按钮不要直接调它，而是调
+    ``request_delete_session`` —— 因为"删除数据"和"切换当前会话"必须分开做：
+    Streamlit 会回滚控件回调里的 session_state 变更，如果在回调里把
+    current_session 换成新 ID，重跑后它会变回被删除的那条，于是应用又把它
+    当成一个空会话显示出来（表现：删除了但按钮不消失、点进去是空的）。
+    """
     try:
         storage.delete_prefix(store._session_dir(session_name))
         flat = _legacy_key(session_name)  # 兼容还没迁移的旧扁平存档
@@ -589,3 +640,39 @@ def delete_session(session_name: str) -> None:
         st.error(f"删除会话失败: {e}")
         return
     st.rerun()  # 刷新页面
+
+
+# --------------------------------------------------------------------------- #
+# 待执行的动作：回调里只登记，真正执行放在主脚本体里
+#
+# 为什么不能直接在回调里做：Streamlit 会在回调结束后把 session_state 回滚到
+# 点击前的快照（本项目里反复踩到）。所以"删除会话并切到新会话""新建会话"这类
+# 需要同时改数据的动作，必须拆成两步：
+#   回调 → 只写一个待办标记 → 重跑 → 主脚本体里执行（此时状态变更能留住）
+# --------------------------------------------------------------------------- #
+PENDING_DELETE = "_pending_delete"
+PENDING_NEW = "_pending_new_session"
+
+
+def request_delete_session(session_name: str) -> None:
+    """删除按钮的回调：只登记"要删哪条"，真正的删除交给主脚本体。
+
+    这里**不调用 st.rerun()**：Streamlit 在回调结束后本来就会自动重跑一次，
+    多调一次没有好处，反而在 AppTest 等环境下不会被执行，导致待办永远不处理。
+    """
+    st.session_state[PENDING_DELETE] = session_name
+
+
+def request_new_session() -> None:
+    """「新建会话」按钮的回调：只登记，实际切换交给主脚本体。"""
+    st.session_state[PENDING_NEW] = True
+
+
+def run_pending_actions() -> None:
+    """在主脚本体开头执行待办动作（此时状态变更不会被回滚）。"""
+    target = st.session_state.pop(PENDING_DELETE, None)
+    if target:
+        delete_session(target)          # 内部会 st.rerun()，后面的代码不会执行
+        return
+    if st.session_state.pop(PENDING_NEW, None):
+        new_session()

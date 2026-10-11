@@ -140,6 +140,10 @@ def main() -> None:
     _render_login()          # 第一道门：你是谁（未配置登录时直接放行）
     _render_api_key_gate()   # 第二道门：用谁的 key
 
+    # 待执行动作（新建/删除会话）必须在渲染与存储读写之前处理：它们会改
+    # current_session，而回调里的这类变更会被 Streamlit 回滚，导致删了还在。
+    sessions.run_pending_actions()
+
     # 当前用户：**必须在任何存储读写之前**设置。存储层据此把读写限定在
     # users/<用户名>/ 这棵子树里，所以一个用户不可能看到或碰到别人的会话。
     uid = auth.current_user_id() or "local"
@@ -231,7 +235,7 @@ def main() -> None:
             width="stretch",
             icon=":material/add_comment:",
             type="primary" if sessions.is_fresh_session() else "secondary",
-            on_click=sessions.new_session,
+            on_click=sessions.request_new_session,
         )
 
         # 会话名称：与存档文件名（会话 ID）解耦，改名不会新建/移动文件
@@ -321,7 +325,7 @@ def main() -> None:
                             width="stretch",
                             type="primary",
                             icon=":material/delete_forever:",
-                            on_click=lambda s=session: sessions.delete_session(s),
+                            on_click=lambda s=session: sessions.request_delete_session(s),
                         )
 
         # 分支管理：一个会话可以有多条分支（编辑消息 / 重新生成都会新建分支）
