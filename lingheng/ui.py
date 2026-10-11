@@ -146,8 +146,15 @@ def main() -> None:
 
     # 当前用户：**必须在任何存储读写之前**设置。存储层据此把读写限定在
     # users/<用户名>/ 这棵子树里，所以一个用户不可能看到或碰到别人的会话。
-    uid = auth.current_user_id() or "local"
-    storage.set_current_uid(uid)
+    uid = auth.current_user_id()
+    if auth.auth_enabled() and not uid:
+        # 配了登录、但这次没解析出用户名（cookie 过期/被清）。
+        # **绝不能**退回 "local" 这种兜底用户名去读写：那会让用户看到"自己的会话
+        # 全没了"，还会把数据写进一个不属于任何人的分区（库里出现 users/local/ 的
+        # 草稿就是这么来的）。这里直接停下，让用户重新登录。
+        st.warning("登录状态已失效，请重新登录。")
+        st.stop()
+    storage.set_current_uid(uid or "local")
     # 同一个浏览器换了账号时，清掉上一个账号的会话态，避免界面串位
     # （磁盘上的数据本来就按用户隔离，这里只是不让内存里的旧会话"接着显示"）
     if st.session_state.get("_uid") not in (None, uid):

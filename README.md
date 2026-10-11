@@ -218,6 +218,13 @@ Streamlit Community Cloud 的出口 IP **不固定且官方不公布**，只放�
 
 ## 项目结构
 
+> ⚠️ **`lingheng/__init__.py` 不能删。** 删了它 `lingheng` 会退化成
+> namespace package，本地 Python 3.12 照常跑，但 Streamlit Cloud 的 **Python 3.14**
+> 会在导入期抛 `KeyError: 'lingheng.config'` /
+> `partially initialized module ... (circular import)`，页面脚本根本执行不完 ——
+> 表现是"切换/删除会话后一片空白"。这条有回归测试
+> （[tests/test_package_import.py](tests/test_package_import.py)），别绕过它。
+
 ```
 AI_partner.py        入口（薄）：代理导出包里的名字，并执行页面
 lingheng/            应用实现
