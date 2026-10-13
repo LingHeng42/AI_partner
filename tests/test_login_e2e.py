@@ -115,6 +115,41 @@ print(f"\n  元素数量对比：未登录 main={len(at.main)}  已登录 main={
 check("已登录时渲染的东西不比未登录多（说明表单没被重画）",
       len(at2.main) <= len(at.main), (len(at.main), len(at2.main)))
 
+# --------------------------------------------------------------------------- #
+# 3. **真实提交登录表单**（这才是用户走的那条路）
+#
+#   库在登录成功后会 set_cookie()（浏览器组件往返）但不重跑 —— 界面要等 cookie
+#   回来才更新，手机上就"停好几秒"。我们在提交成功后主动重跑一次，
+#   所以提交完的**这一轮结果里就不该再有登录表单**。
+# --------------------------------------------------------------------------- #
+print("\n=== 3. 真实提交登录表单 ===")
+at3 = run_app()
+inputs = {t.label: t for t in at3.text_input}
+check("登录页有 Username / Password 两个输入框",
+      "Username" in inputs and "Password" in inputs, list(inputs))
+submit = next((b for b in at3.button if b.label == "Login"), None)
+check("登录页有 Login 按钮", submit is not None, [b.label for b in at3.button])
+
+if "Username" in inputs and "Password" in inputs and submit is not None:
+    inputs["Username"].set_value("lingheng42")
+    inputs["Password"].set_value(PASSWORD)
+    at3 = submit.click().run()
+
+    check("提交后页面无异常", not at3.exception, [e.message[:200] for e in at3.exception])
+    check("提交后已是登录态", at3.session_state.get("authentication_status") is True,
+          at3.session_state.get("authentication_status"))
+    check("提交后用户名正确", at3.session_state.get("username") == "lingheng42",
+          at3.session_state.get("username"))
+    # 关键：提交完这一轮就已经不是登录页了（不必等 cookie 往返）
+    left = [t for t in at3.text_input if "password" in (t.label or "").lower()]
+    check("**提交后这一轮里登录表单就消失了**（不必等 cookie 回来）", len(left) == 0,
+          [(t.label, t.type) for t in at3.text_input])
+    check("提交后不再停在登录页（没有 Login 按钮）",
+          not any(b.label == "Login" for b in at3.button), [b.label for b in at3.button])
+    check("提交后标记已复位（不会无限重跑）",
+          at3.session_state.get("_login_form_rendered") is False,
+          at3.session_state.get("_login_form_rendered"))
+
 print()
 print("FAILURES:", failures if failures else "none")
 sys.exit(1 if failures else 0)

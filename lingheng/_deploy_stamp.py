@@ -10,5 +10,5 @@ GitHub 的 commit 号在页面上看不见，而 Streamlit Cloud 的日志只告
 - BUILD 写这次改的是什么，便于对照
 """
 
-VERSION = "2.1.0"
-BUILD = "修登录后表单重画导致的卡顿（已登录时直接放行）"
+VERSION = "2.1.1"
+BUILD = "修登录卡顿：调短库的防爆破 sleep + 提交成功后立刻重跑（不等 cookie）"

@@ -23,6 +23,16 @@ from . import config
 # 每次脚本运行只构造一次登录组件（原因见 _cached 的说明）
 _AUTH_CACHE_STATE = "_auth_instance"
 
+# 渲染登录表单前的等待秒数（库的默认值是 0.7 秒，见 params.PRE_LOGIN_SLEEP_TIME）。
+# 那是防暴力破解的人为延迟；本应用的用户表是站长手工维护的固定名单、不开放注册，
+# 所以调短它。保留一点点延迟，不完全取消。
+LOGIN_SLEEP_TIME = 0.1
+
+# "本次运行把登录表单画出来了"的标记（用来判断登录是不是刚刚提交成功的）
+FORM_RENDERED_STATE = "_login_form_rendered"
+# "已经为这次登录成功重跑过一次"的闸门（防止极端情况下无限重跑）
+FORM_RERUN_STATE = "_login_form_rerun"
+
 
 def _runtime_override(name):
     """运行时覆盖值：测试写 ``app.ALLOWED_USERS = [...]`` 就能注入（同 config 的机制）。"""
@@ -184,6 +194,19 @@ def _authenticator():
             return stauth.Authenticate(
                 _plain(creds), _cookie_config()["name"],
                 _cookie_config()["key"], _cookie_config()["expiry_days"],
+                # streamlit-authenticator 在渲染登录表单**之前**会
+                # ``time.sleep(self.attrs['login_sleep_time'])``（默认 0.7 秒）——
+                # 那是防暴力破解的人为延迟。本应用的用户表是站长手工维护的固定名单、
+                # 不开放注册，暴力破解的收益远小于等待成本，所以调短它。
+                # 注意这个参数只能在**构造时**通过 kwargs 传入（库把它存进 self.attrs），
+                # login() 本身不接受它。
+                login_sleep_time=LOGIN_SLEEP_TIME,
+            )
+        except TypeError:
+            # 老版本没有这个 kwargs 支持：退回默认行为（只是慢一点，不影响功能）
+            return stauth.Authenticate(
+                _plain(creds), _cookie_config()["name"],
+                _cookie_config()["key"], _cookie_config()["expiry_days"],
             )
         except Exception as exc:  # noqa: BLE001 - 配置写错时不要让整页崩，但必须留下原因
             # 这里不能只是静默返回 None：线上表现为"登录页不出现/点不进去"，
@@ -271,17 +294,56 @@ def _module_available() -> bool:
 
 
 def do_login() -> bool:
-    """渲染登录表单并返回是否已登录（供 ui.py 调用）。"""
+    """渲染登录表单并返回是否已登录（供 ui.py 调用）。
+
+    两个"卡一下"的坑都出在这个库的 login() 里（读过它的源码）：
+
+    1. 它在渲染表单**之前**会 ``time.sleep(login_sleep_time)``（默认 0.7 秒），
+       那是防暴力破解的人为延迟 —— 每次真正画出登录表单都要等这 0.7 秒。
+       这里显式传一个更短的值：本应用的用户表是站长手工维护的固定名单（不开放
+       注册），暴力破解的收益远小于等待成本。仍保留一点延迟，不完全取消。
+    2. 登录成功后它调用 ``cookie_controller.set_cookie()`` —— 那是**浏览器组件
+       往返**，而且它后面那句 ``if self.path and ...: st.rerun()`` 在没配 yaml
+       path 时**不会**重跑。于是登录成功后的界面要等 cookie 往返回来才更新，
+       手机（网络慢）上就表现为"登录界面停好几秒才消失"。
+
+       其实不需要等：校验成功时它已经把 ``authentication_status / username /
+       name`` 写进 session_state 了，**同一个会话里立刻可见**。cookie 只是给
+       "下次打开页面"用的。所以这里在登录成功后**主动重跑一次**，主界面立即出现，
+       不必等 cookie 回来。
+    """
     authenticator = _authenticator()
     if authenticator is None:
         return False
+    if st.session_state.get("authentication_status") is True:
+        return True
+    # 标记"本次运行把登录表单画出来了"。提交成功时用它区分
+    # "刚提交表单"与"只是刷新了页面"：前者要立刻重跑（否则表单会停留一下），
+    # 后者不必（cookie 路径本来就会在同一轮里继续往下渲染）。
+    st.session_state[FORM_RENDERED_STATE] = True
     # 显式给一个控件 key：不传时它内部用 "init" 之类的固定 key，重跑时容易撞上
     # StreamlitDuplicateElementKey（登录页直接报错、点不进去）。
+    # （防暴力破解的 sleep 已在构造时通过 login_sleep_time 调短，见 _authenticator。）
     try:
         authenticator.login(location="main", key="lingheng_login")
     except TypeError:  # 老版本没有 key 参数
         authenticator.login(location="main")
-    return st.session_state.get("authentication_status") is True
+    if st.session_state.get("authentication_status") is True:
+        if st.session_state.get(FORM_RENDERED_STATE):
+            # 表单是本次画出来的、而且现在已经登录 → 刚刚提交成功。
+            # 立刻重跑：此时 session_state 已是登录态，主界面马上出现，
+            # **不必等 cookie 的浏览器往返**（手机慢就是慢在这一步）。
+            #
+            # 只重跑**一次**：万一本库某个版本在"没提交也要置为已登录"，
+            # 缺少这道闸就会无限重跑（页面卡死）。真库不会这样，但代价太低不值得赌。
+            st.session_state[FORM_RENDERED_STATE] = False
+            if not st.session_state.get(FORM_RERUN_STATE):
+                st.session_state[FORM_RERUN_STATE] = True
+                st.rerun()
+        return True
+    # 没登录成功 → 清掉闸门，下次提交仍然可以立刻重跑
+    st.session_state[FORM_RERUN_STATE] = False
+    return False
 
 
 def do_logout() -> None:
