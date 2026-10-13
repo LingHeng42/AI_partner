@@ -10,5 +10,5 @@ GitHub 的 commit 号在页面上看不见，而 Streamlit Cloud 的日志只告
 - BUILD 写这次改的是什么，便于对照
 """
 
-VERSION = "2.0.9"
-BUILD = "整理侧边栏（技术信息收到底部折叠区）+ 修无存档会话切换不生效"
+VERSION = "2.1.0"
+BUILD = "修登录后表单重画导致的卡顿（已登录时直接放行）"

@@ -244,6 +244,37 @@ Streamlit Community Cloud 的出口 IP **不固定且官方不公布**，只放�
    因为 `streamlit-authenticator` 不开放自助注册，拿到链接的陌生人没有账号密码也进不来。
 4. 会话存在数据库里，所以**本地 `sessions/` 目录只在本地开发时才有内容**。
 
+## 登录与"卡一下"的由来（已修）
+
+登录门控的渲染顺序有个坑，值得记下来：
+
+```python
+# ❌ 以前：先渲染表单，再判断登录态
+def _render_login():
+    st.title(...)
+    auth.do_login()              # 每次都画登录表单
+    if not auth.current_user():  # 之后才发现"其实已经登录了"
+        st.stop()
+
+# ✅ 现在：已登录立刻放行，一行表单都不画
+def _render_login():
+    if auth.current_user():
+        return
+```
+
+旧写法下，**登录成功后的那次重跑会把整个登录表单再画一遍**（连同
+streamlit-authenticator 内部的 CookieManager 组件），用户看到的就是"登录界面
+卡一下才消失"。改成先判断登录态后，实测已登录那次重跑渲染的元素从 6 个降到 3 个。
+
+> 补充：`streamlit-authenticator` 内部登录成功后会调用 `cookie_controller.set_cookie()`
+> （浏览器组件往返，有成本），而它后面那个 `if self.path and ...: st.rerun()`
+> 在没配 yaml 路径时**不会**触发额外重跑。所以"多画一遍表单"就是主要开销来源。
+
+本地要跑登录相关的测试，看这两套：[tests/test_login_render.py](tests/test_login_render.py)
+（结构与行为断言，8 条）与 [tests/test_login_e2e.py](tests/test_login_e2e.py)
+（真库 + bcrypt 真哈希跑完整门控，12 条）。后者用环境变量注入凭据
+（`AUTH_CREDENTIALS` 放 JSON 字符串、`COOKIE_KEY`），不需要 secrets 文件。
+
 ## 侧边栏结构
 
 上端只放**每天要用的**，技术性的东西一律收到底部折叠区（否则上端会被诊断信息挤满，

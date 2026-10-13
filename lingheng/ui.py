@@ -25,8 +25,17 @@ def _page_config() -> None:
 
 
 def _render_login() -> None:
-    """登录门：没配登录（本地开发）直接放行；配了就要求先登录。"""
+    """登录门：没配登录（本地开发）直接放行；配了就要求先登录。
+
+    **已经登录时要立刻放行，绝不渲染登录表单。** 以前的写法是先无条件
+    ``auth.do_login()``（渲染表单）、之后再判断 ``current_user()`` ——
+    于是登录成功后那次重跑会把整个登录表单连同 CookieManager 组件再画一遍，
+    用户看到的就是"登录界面卡一下才消失"。表单里的控件 key 也白占一轮。
+    """
     if not auth.auth_enabled():
+        return
+    # 先看登录态（cookie 校验的结果已在 session_state 里）：已登录就直接放行
+    if auth.current_user():
         return
     st.title("凌恒的酒馆")
     if not auth.login_form_allowed():
