@@ -195,28 +195,49 @@ def _delta_text(chunk) -> tuple:
 
 
 def _remember_expander(widget_key: str, state_key: str) -> None:
-    """把用户手动展开/折叠的状态镜像到状态键，避免每次重跑都被重置。"""
-    st.session_state[state_key] = st.session_state[widget_key]
+    """把用户手动展开/折叠的状态镜像到状态键。
+
+    注意：**现在这条路只在重跑之后才走到**（on_change="ignore" 不触发重跑，
+    见 reasoning_expander 的说明），所以它其实是个兜底；真正生效的是渲染时
+    从控件键把状态读回来。
+    """
+    if widget_key in st.session_state:
+        st.session_state[state_key] = st.session_state[widget_key]
 
 
 def reasoning_expander(key: str, state_key: str, expanded: bool):
-    """带记忆的「思考过程」折叠面板：用户手动开合后不会被流式重跑重置。
+    """带记忆的「思考过程」折叠面板。
 
-    type="compact" 是 Streamlit 官方推荐的思考块样式（无边框内联展开），
-    与 ChatGPT / DeepSeek 的「思考过程」观感一致。
+    type="compact" 是 Streamlit 官方推荐的思考块样式（无边框内联展开）。
+
+    **关键：on_change 必须是 "ignore"。** 这个面板在生成过程中是可见的，用户
+    很自然会在"思考中"顺手点它开合。以前这里是 on_change 回调 —— 那会触发一次
+    重跑，而重跑会**打断正在进行的流式请求**：
+
+      · 被打断的那一轮，助手回答还没写进 message（remember_reply 还没执行）
+      · st.write_stream 被中断时**静默返回空字符串**（不抛异常），
+        于是 remember_reply 认为"模型没有返回任何内容"，什么都不记录
+      · 重跑后 message 里只剩用户那一句 → **整条回答连同思考内容一起消失**
+
+    这就是用户报的"思考时点折叠面板，那条消息会消失"。用 "ignore" 之后，
+    这个控件只改自己的状态、不重跑，流不会被打断。
     """
     # 注意：不能用 st.session_state.setdefault —— 真实的 session_state 是代理对象，
     # 没有这个方法，属性访问会变成"读取同名键"并抛 KeyError（线上白屏的原因之一）。
     if state_key not in st.session_state:
         st.session_state[state_key] = expanded
+    # on_change="ignore" 不会给我们回调，所以每次渲染时把"用户上次点出来的状态"
+    # 从控件键读回来（控件键由 Streamlit 自己维护，跨重跑都在）。
+    elif key in st.session_state:
+        st.session_state[state_key] = st.session_state[key]
     return st.expander(
         "思考过程",
         expanded=st.session_state[state_key],
         key=key,
         type="compact",
         icon=":material/neurology:",
-        on_change=_remember_expander,
-        args=(key, state_key),
+        # 不触发重跑：既避免打断流式生成，也避免"点一下就跑一轮"的开销
+        on_change="ignore",
     )
 
 
@@ -451,6 +472,9 @@ def render_history() -> None:
                         args=(index,),
                     )
                     # 分支切换箭头：只在同源分支之间循环（‹ 2/3 ›）
+                    # 必须走 pending 路由（只登记、主脚本体里执行）：switch_branch
+                    # 会改 st.session_state.current_branch，而回调里的状态变更会被
+                    # Streamlit 回滚 —— 直接当回调用会出现"点了箭头没反应/内容不对"。
                     if len(siblings) > 1:
                         position = siblings.index(branch) if branch in siblings else 0
                         prev_branch = siblings[(position - 1) % len(siblings)]
@@ -460,7 +484,8 @@ def render_history() -> None:
                             st.button(
                                 "", key=f"branch_prev_{branch}_{index}",
                                 icon=":material/chevron_left:",
-                                help=f"切到 {prev_branch}", on_click=branches.switch_branch,
+                                help=f"切到 {prev_branch}",
+                                on_click=sessions.request_switch_branch,
                                 args=(st.session_state.current_session, prev_branch),
                             )
                         with nav[1]:
@@ -469,7 +494,8 @@ def render_history() -> None:
                             st.button(
                                 "", key=f"branch_next_{branch}_{index}",
                                 icon=":material/chevron_right:",
-                                help=f"切到 {next_branch}", on_click=branches.switch_branch,
+                                help=f"切到 {next_branch}",
+                                on_click=sessions.request_switch_branch,
                                 args=(st.session_state.current_session, next_branch),
                             )
 
