@@ -35,8 +35,16 @@ def _fork_point_id(items: list, branch: dict) -> str:
         parent = next((b for b in items if str(b["id"]) == str(parent_id)), None)
         if parent is None:
             return str(parent_id)
-        # parent 也是"在同一位置分叉"的分支 → 它只是同组的新成员，不是分叉点
-        if parent.get("fork_index") == current.get("fork_index") is not None:
+        # 老数据里 parent 也可能是"同一位置分叉出来的另一条分支"（链式创建），
+        # 那它就不是真正的分叉点，继续往上走。
+        #
+        # 判据刻意保守：只有当 parent **自己也是分叉产物**（它的 fork_index 非空，
+        # 说明它也是从别处按索引分出来的）且索引与当前一致时才并上去。
+        # 不能用"parent 恰好和自己 fork_index 相同"——嵌套分叉那条链上
+        # （b3.parent=b2、两者 fork_index 都是 0）会误判，把嵌套层并成兄弟。
+        fold = (parent.get("fork_index") is not None
+                and parent.get("fork_index") == current.get("fork_index"))
+        if fold:
             seen.add(str(parent["id"]))
             current = parent
             continue
