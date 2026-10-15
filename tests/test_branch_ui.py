@@ -124,9 +124,14 @@ check("非当前分支不高亮", any(b.label == "main" and b.proto.type != "pri
 check("同一分叉点的兄弟分支会渲染出切换箭头",
       any(b.proto.icon and "chevron" in b.proto.icon for b in at.button),
       [(b.label, b.proto.icon) for b in at.button])
-check("每轮消息都渲染了分支计数（说明两轮都有箭头）",
-      sum(1 for c in at.caption if (c.value or "").startswith("分支 ")) == 2,
+# 箭头只在**分叉点那一条消息**下面渲染（分叉点 = fork_index = 1）。
+# 以前是每条消息都画，等于说"后面每一轮也各自分了叉"，既误导又更容易撞 key。
+check("分叉点那条消息下有分支计数（‹ 2/3 ›）",
+      [c.value for c in at.caption if (c.value or "").startswith("分支 ")] == ["分支 2/3"],
       [c.value for c in at.caption])
+check("箭头只渲染在分叉点那一条上（不重复）",
+      sum(1 for b in at.button if b.proto.icon and "chevron" in b.proto.icon) == 2,
+      [(b.key, b.proto.icon) for b in at.button if b.proto.icon])
 check("箭头 key 带消息序号（修复重复 key）",
       'key=f"branch_prev_{branch}_{index}"' in app_source()
       and 'key=f"branch_next_{branch}_{index}"' in app_source())

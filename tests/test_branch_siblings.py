@@ -119,10 +119,16 @@ check("连续重新生成创建了 4 条新分支", ids == ["b2", "b3", "b4", "b
 
 sibs = branches.branch_siblings(SID, "b2")
 check("**同一个分叉点的分支互为兄弟**（箭头靠它工作）",
-      sibs == ["b2", "b3", "b4", "b5"], sibs)
+      sibs == ["main", "b2", "b3", "b4", "b5"], sibs)
+# 源分支（main）必须在组里：否则从 b2 切回 main 之后，main 那边算出来只有自己，
+# 箭头因为"只有 1 条"不渲染，用户就再也切不回改写版本了 —— 这正是用户报的
+# 「修改留言内容根本不能创建分支」。见 group_members 的文档。
 for bid in ids:
     check(f"{bid} 的兄弟集合一致", branches.branch_siblings(SID, bid) == sibs,
           branches.branch_siblings(SID, bid))
+check("站在源分支 main 上看到的也是同一组（能切回去）",
+      branches.branch_siblings(SID, "main") == sibs,
+      branches.branch_siblings(SID, "main"))
 
 meta = meta_of(SID)
 check("**所有兄弟共用同一个分叉点**（不再是 b2←b3←b4 链条）",
@@ -135,10 +141,10 @@ check("fork_index 一致",
 other = fork(SID, 3)
 check("另一个分叉点创建了新分支", other == "b6", other)
 check("不同分叉点的分支**不**算兄弟",
-      branches.branch_siblings(SID, other) == ["b6"],
+      branches.branch_siblings(SID, other) == ["main", "b6"],
       branches.branch_siblings(SID, other))
-check("原兄弟组不受影响",
-      branches.branch_siblings(SID, "b2") == ["b2", "b3", "b4", "b5"],
+check("原兄弟组不受影响（b6 那个位置的不许混进来）",
+      branches.branch_siblings(SID, "b2") == ["main", "b2", "b3", "b4", "b5"],
       branches.branch_siblings(SID, "b2"))
 # 在第一条兄弟上再重新生成 → 仍进同一组
 sessions.st.session_state["current_branch"] = "b2"
@@ -163,11 +169,17 @@ check("**编辑是嵌套分叉**：b3 的父/分叉点都是 b2",
 check("b4 的父/分叉点都是 b3",
       meta2["b4"][0] == "b3" and meta2["b4"][2] == "b3", meta2["b4"])
 check("**嵌套层不会被误判成兄弟**（fork_index 相同也不并组）",
-      branches.branch_siblings(SID2, "b3") == ["b3"],
+      branches.branch_siblings(SID2, "b3") == ["b2", "b3"],
       branches.branch_siblings(SID2, "b3"))
-check("第一层的分支同样只有自己",
-      branches.branch_siblings(SID2, "b2") == ["b2"],
+check("b4 的组也只跟它的分叉点 b3 在一起",
+      branches.branch_siblings(SID2, "b4") == ["b3", "b4"],
+      branches.branch_siblings(SID2, "b4"))
+check("第一层的分支只跟 main 成组（不把嵌套层拉进来）",
+      branches.branch_siblings(SID2, "b2") == ["main", "b2"],
       branches.branch_siblings(SID2, "b2"))
+check("嵌套最深处不会跟 main 混在一起",
+      "main" not in branches.branch_siblings(SID2, "b3"),
+      branches.branch_siblings(SID2, "b3"))
 
 # --------------------------------------------------------------------------- #
 # 3. 老存档兼容：没有 fork_point 字段时按 parent 兜底推断
@@ -183,8 +195,8 @@ raw["branches"] = [{"id": b["id"], "parent": b["parent"], "fork_index": b["fork_
                    sessions.normalize_branches(raw["branches"])]
 sessions.write_session_meta(SID3, raw)
 sibs_old = branches.branch_siblings(SID3, bare)
-check("老存档（无 fork_point）仍能算出兄弟（兜底到 parent）",
-      sibs_old == [bare], sibs_old)
+check("老存档（无 fork_point）仍能算出兄弟（兜底到 parent + 源分支）",
+      sibs_old == ["main", bare], sibs_old)
 
 # 老存档上继续分叉：第二个分支的分叉点应推断为 main（链式替代）
 sessions.st.session_state["current_branch"] = bare
@@ -193,7 +205,9 @@ check("老存档上再分叉 → 分叉点推断为 main", inferred == "main", i
 third = branches.fork_branch(SID3, [dict(m) for m in MSG[:1]],
                              seed=None, parent=inferred, fork_index=1, fork_point=inferred)
 check("老存档上分出的第二个分支与第一个互为兄弟",
-      branches.branch_siblings(SID3, bare) == sorted([bare, third]),
+      # 不能再用 sorted()：现在组里含源分支 main，字母序会把 main 排到最后，
+      # 而实际顺序是**创建顺序**（main 最先）。
+      branches.branch_siblings(SID3, bare) == ["main", bare, third],
       branches.branch_siblings(SID3, bare))
 
 # --------------------------------------------------------------------------- #

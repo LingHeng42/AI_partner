@@ -439,7 +439,8 @@ def render_history() -> None:
     另一条分支的同序号消息上（与"删会话后弹层串位"是同一类问题）。
     """
     branch = st.session_state.get("current_branch") or "main"
-    siblings = branches.branch_siblings(st.session_state.current_session, branch) if sessions.session_file_exists() else [branch]
+    siblings = _siblings_for(branch)
+    forked_at = _fork_index_for(branch) if len(siblings) > 1 else None
     last = len(st.session_state.message) - 1
     for index, msg in enumerate(st.session_state.message):
         with st.chat_message(msg["role"], avatar=images.current_avatar(msg["role"])):
@@ -482,7 +483,7 @@ def render_history() -> None:
             else:
                 if msg.get("content"):
                     st.markdown(msg["content"])
-                _render_message_actions(branch, index, last, siblings)
+                _render_message_actions(branch, index, last, siblings, forked_at)
 
 def _siblings_for(branch: str) -> list:
     """当前分支所在的分叉组（没有存档时就是它自己）。"""
@@ -491,7 +492,16 @@ def _siblings_for(branch: str) -> list:
     return [branch]
 
 
-def _render_message_actions(branch: str, index: int, last: int, siblings: list) -> None:
+def _fork_index_for(branch: str) -> int:
+    """当前兄弟组在哪一条消息处分叉（箭头只画在那一条下面）。"""
+    if not sessions.session_file_exists():
+        return -1
+    index = branches.group_fork_index(st.session_state.current_session, branch)
+    return -1 if index is None else index
+
+
+def _render_message_actions(branch: str, index: int, last: int, siblings: list,
+                            forked_at: int) -> None:
     """一条消息的操作入口：⋯ 菜单（编辑/重新生成）与分支切换箭头。
 
     **必须由"历史回放"和"刚刚生成完的那轮"共用。** 以前只有历史回放里画这些，
@@ -516,7 +526,8 @@ def _render_message_actions(branch: str, index: int, last: int, siblings: list) 
             on_click=start_edit,
             args=(index,),
         )
-    _render_branch_arrows(branch, index, siblings)
+    if index == forked_at:
+        _render_branch_arrows(branch, index, siblings)
 
 
 def _render_branch_arrows(branch: str, index: int, siblings: list) -> None:
@@ -525,6 +536,9 @@ def _render_branch_arrows(branch: str, index: int, siblings: list) -> None:
     必须走 pending 路由（只登记、主脚本体里执行）：switch_branch 会改
     st.session_state.current_branch，而回调里的状态变更会被 Streamlit 回滚 ——
     直接当回调用会出现"点了箭头没反应/内容不对"。
+
+    只有**分叉点那一条消息**下面才画（forked_at）。以前是每条消息都画，
+    等于说"后面每一轮也各自分了叉"，既误导又更容易撞控件 key。
     """
     if len(siblings) <= 1:
         return

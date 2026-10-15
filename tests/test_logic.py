@@ -572,14 +572,19 @@ check("fork 后当前分支切到新分支",
 check("分支记下父分支与分叉点",
       [(b["parent"], b["fork_index"]) for b in app.load_session_meta(bsid)["branches"] if b["id"] == "b2"]
       == [("main", 1)])
-check("兄弟分支识别", app.branch_siblings(bsid, "b2") == ["b2"], app.branch_siblings(bsid, "b2"))
+# 兄弟组里包含**分叉点本身**（main）：否则从 b2 切回 main 之后 main 算出来只有
+# 自己，分支箭头会因为"只有 1 条"不渲染，用户就再也切不回改写版本了。
+check("兄弟分支识别", app.branch_siblings(bsid, "b2") == ["main", "b2"],
+      app.branch_siblings(bsid, "b2"))
+check("站在源分支上看到的是同一组", app.branch_siblings(bsid, "main") == ["main", "b2"],
+      app.branch_siblings(bsid, "main"))
 
 # 再 fork 一条同源分支 → 成为兄弟
 third = app.fork_branch(bsid, prefix=[{"role": "user", "content": "问题"}],
                         seed={"role": "assistant", "content": "回答 C"},
                         parent="main", fork_index=1)
 check("第三条分支 ID 继续递增", third == "b3", third)
-check("同源分支互为兄弟", sorted(app.branch_siblings(bsid, "b2")) == ["b2", "b3"],
+check("同源分支互为兄弟", app.branch_siblings(bsid, "b2") == ["main", "b2", "b3"],
       app.branch_siblings(bsid, "b2"))
 
 # 切换分支：写磁盘指针（内存里的消息由渲染时"以磁盘为准"重载，见下面"重新进入会话"那组断言）
@@ -1031,7 +1036,10 @@ check("在分支上编辑会再建分支", nested == "b4", nested)
 check("嵌套分叉的父分支是 b3",
       [(b["parent"], b["fork_index"]) for b in app.load_session_meta(edit_id)["branches"]
        if b["id"] == "b4"] == [("b3", 0)])
-check("兄弟分支关系正确", app.branch_siblings(edit_id, "b3") == ["b3"], app.branch_siblings(edit_id, "b3"))
+# 编辑是嵌套分叉：b3 是从 b2 分出来的，所以它的组是 {b2, b3}；
+# 而 b4 又是从 b3 分出来的，不会并进这一组（见下面 fork_point 的断言）。
+check("兄弟分支关系正确", app.branch_siblings(edit_id, "b3") == ["b2", "b3"],
+      app.branch_siblings(edit_id, "b3"))
 
 # 空内容不落盘、不建分支
 before_branches = app.branch_ids(edit_id)

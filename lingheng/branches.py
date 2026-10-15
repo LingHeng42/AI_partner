@@ -52,20 +52,46 @@ def _fork_point_id(items: list, branch: dict) -> str:
 
 
 def group_members(session_name: str, branch_id: str) -> list:
-    """同一条分支所在的"兄弟组"（同一个分叉点分出来的所有分支，按创建顺序）。
+    """同一次分叉产生的"兄弟组"（能互相切换的那些版本，按创建顺序）。
 
-    分组依据是**分叉点**而不是 parent —— 原因见 _fork_point_id。
+    分组依据是**分叉点 + 分叉位置**（见 _fork_point_id），不是 parent ——
+    连续重新生成时分支是链式创建的（b2.parent=main、b3.parent=b2、b4.parent=b3），
+    按 parent 分组会把它们拆散，箭头只显示 1/1、切不过去。
+
+    **分叉点本身（源分支）也算这个组的成员**，这是"编辑后看起来没建分支"的关键：
+    在 main 的第 1 条编辑产生 b2，b2 的分叉点是 main，但 main 不是分叉产生的
+    （自己 fork_index 为空），以前按 ``fork_index`` 相等筛选时它进不了组 ——
+    于是从 b2 切回 main 之后，main 那边算出来只有它自己，箭头因为"只有 1 条"
+    整个不渲染，用户就再也切不回改写版本了，看起来像"编辑没创建分支"。
+
+    反向也要成立：站在源分支（main）上时，取"从它分出去的最早那个位置"上的
+    子分支一起成组。两边的结果必须完全一致，否则会出现"切过去就切不回来"。
+
+    嵌套分叉不会被误并：在 b2 上编辑产生的 b3，分叉点是 b2 而不是 main，
+    它的组是 {b2, b3}，与 {main, ...} 无关（见 fork_point_for 里两种语义的区分）。
     """
     items = sessions.normalize_branches(
         sessions.load_session_meta(session_name).get("branches"))
     me = next((b for b in items if str(b["id"]) == str(branch_id)), None)
     if me is None:
         return [branch_id]
+    my_id = str(me["id"])
     point = _fork_point_id(items, me)
+    if str(point) != my_id:
+        # 我是分叉产物：分叉点（源分支）+ 同一分叉点、同一位置上的所有并列版本。
+        anchor, anchor_index = str(point), me.get("fork_index")
+    else:
+        # 我自己就是源分支（不是分叉产生的，没有 fork_index）：那就取"从我分出去的
+        # 最早那个位置"上的所有子分支，跟它们互相能切。
+        kids = [b for b in items
+                if _fork_point_id(items, b) == my_id and b.get("fork_index") is not None]
+        anchor = my_id
+        anchor_index = min((b["fork_index"] for b in kids), default=None)
     same = [str(b["id"]) for b in items
-            if b.get("fork_index") == me.get("fork_index")
-            and _fork_point_id(items, b) == point]
-    return same or [str(branch_id)]
+            if str(b["id"]) == anchor
+            or (_fork_point_id(items, b) == anchor
+                and b.get("fork_index") == anchor_index)]
+    return same or [branch_id]
 
 
 def fork_point_for(session_name: str, current_branch: str, fork_index: int,
@@ -130,13 +156,32 @@ def next_branch_id(session_name: str) -> str:
 
 
 def branch_siblings(session_name: str, branch_id: str) -> list:
-    """同一次分叉产生的兄弟分支（同一个分叉点分出来的那些），按创建顺序。
+    """同一次分叉产生的兄弟分支（同一个分叉点、同一个位置分出来的那些），按创建顺序。
 
-    分组依据是**分叉点**而不是 parent —— 连续重新生成时分支是链式创建的
+    分组依据是**分叉点 + 分叉位置**而不是 parent —— 连续重新生成时分支是链式创建的
     （b2.parent=main、b3.parent=b2、b4.parent=b3），按 parent 分组会把它们拆散，
     箭头就只显示 1/1、切不过去（用户报的"分支似乎只能存在两个"）。
+
+    组里**包含分叉点本身**（源分支），所以在 main 的第 0 条编辑出来的 b2 与 main
+    互为兄弟：‹ 1/2 › 能在原文和新版本之间来回切。具体见 group_members。
     """
     return group_members(session_name, branch_id)
+
+
+def group_fork_index(session_name: str, branch_id: str) -> int | None:
+    """这个兄弟组在**第几条消息**处分叉（箭头画在那一条下面）。
+
+    取组内最小的 ``fork_index``，而不是"当前分支自己的"：源分支（main）不是分叉
+    产生的、本身没有 fork_index，而组里又可能同时存在从第 0 条和第 1 条改出来的
+    分支。箭头要画在**最早那个分叉位置**，也就是源分支与所有改写版本共享前缀的
+    终点 —— 画在别处会让人以为"后面那条消息也分了叉"。
+    """
+    items = sessions.normalize_branches(
+        sessions.load_session_meta(session_name).get("branches"))
+    members = {str(x) for x in group_members(session_name, branch_id)}
+    indexes = [int(b["fork_index"]) for b in items
+               if str(b["id"]) in members and b.get("fork_index") is not None]
+    return min(indexes) if indexes else None
 
 
 def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None,
