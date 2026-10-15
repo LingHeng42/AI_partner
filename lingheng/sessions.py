@@ -88,11 +88,17 @@ def load_session_meta(session_name: str) -> dict:
         return _legacy_meta(session_name, flat)
     return default_session_meta(session_name)
 
-def _branch(self_id: str, parent=None, fork_index=None) -> dict:
+def _branch(self_id: str, parent=None, fork_index=None, fork_point=None) -> dict:
     return {
         "id": self_id,
         "parent": parent,
         "fork_index": fork_index,
+        # 分叉点：这条分支是**从哪条分支上**分出来的。
+        # 必须有这个字段而不是靠 parent 推：连续重新生成时分支是链式创建的
+        # （b3.parent=b2），而 b3 真正的分叉点和 b2 一样是 main —— 只看 parent
+        # 会把同一组的兄弟拆散，界面上的 ‹ 2/3 › 箭头就永远只有 1/1。
+        # 老存档没有这个字段 → 读取时按 parent 兜底（见 branches._fork_point_id）。
+        "fork_point": fork_point if fork_point is not None else parent,
         "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -143,6 +149,8 @@ def normalize_branches(raw) -> list:
                 "id": str(item["id"]),
                 "parent": item.get("parent"),
                 "fork_index": item.get("fork_index"),
+                # fork_point 缺失（老存档）时留空，由 branches 层按 parent 兜底推断
+                "fork_point": item.get("fork_point"),
                 "created_at": item.get("created_at") or "",
             })
     if not out:

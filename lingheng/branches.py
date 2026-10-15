@@ -11,6 +11,102 @@ from . import config, sessions, storage, store
 
 
 
+def _fork_point_id(items: list, branch: dict) -> str:
+    """一条分支的**分叉点**：它是从哪条分支上分出来的。
+
+    优先用记录里的 ``fork_point`` 字段（创建时写入，无歧义）。老存档没有这个字段，
+    才按 parent 往上推断 —— 因为连续重新生成时分支是链式创建的：
+
+        b2.parent = main, fork_point = main    （在 main 的第 1 条处重新生成）
+        b3.parent = b2,   fork_point = main    （又从 b2 的第 1 条处重新生成）
+
+    b3 的 parent 是 b2（链），但真正分叉点是 main。只看 parent 会把 b2/b3 拆散。
+    """
+    explicit = branch.get("fork_point")
+    if explicit:
+        return str(explicit)
+    # ---- 老存档兜底：按 parent 往上推断 ----
+    seen = {str(branch["id"])}
+    current = branch
+    while True:
+        parent_id = current.get("parent")
+        if parent_id is None or str(parent_id) in seen:
+            return str(current["id"])
+        parent = next((b for b in items if str(b["id"]) == str(parent_id)), None)
+        if parent is None:
+            return str(parent_id)
+        # parent 也是"在同一位置分叉"的分支 → 它只是同组的新成员，不是分叉点
+        if parent.get("fork_index") == current.get("fork_index") is not None:
+            seen.add(str(parent["id"]))
+            current = parent
+            continue
+        return str(parent_id)
+
+
+def group_members(session_name: str, branch_id: str) -> list:
+    """同一条分支所在的"兄弟组"（同一个分叉点分出来的所有分支，按创建顺序）。
+
+    分组依据是**分叉点**而不是 parent —— 原因见 _fork_point_id。
+    """
+    items = sessions.normalize_branches(
+        sessions.load_session_meta(session_name).get("branches"))
+    me = next((b for b in items if str(b["id"]) == str(branch_id)), None)
+    if me is None:
+        return [branch_id]
+    point = _fork_point_id(items, me)
+    same = [str(b["id"]) for b in items
+            if b.get("fork_index") == me.get("fork_index")
+            and _fork_point_id(items, b) == point]
+    return same or [str(branch_id)]
+
+
+def fork_point_for(session_name: str, current_branch: str, fork_index: int,
+                   reuse_chain: bool = True) -> str:
+    """在 ``fork_index`` 处分叉时，新分支的**分叉点**该是谁。
+
+    这是修复"分支似乎只能存在两个"的关键：分叉点必须显式沿用，不能靠 parent 推
+    （连续重新生成时 b3.parent=b2，但真正分叉点是 main）。
+
+    两种操作的分叉点含义不同，必须分开：
+
+    **重新生成（reuse_chain=True，"这次回答换个样子"）**
+        链式替代 —— 用户看着同一条回答反复点重新生成，这些结果应当并列成一排：
+
+            在 main 上重新生成 → 分叉点 = main
+            在 b2 上再重新生成 → b2 的分叉点就是 main → 分叉点 = main（b2/b3 并列）
+
+    **编辑（reuse_chain=False，"从这条分支出发改一条"）**
+        嵌套分叉 —— 用户在某条分支上改内容，新分支应当挂在**那条分支**下面：
+
+            在 b3 上编辑它的第 0 条 → 分叉点 = b3（不会因为"索引也是 0"
+                                      就并进 main 那一组）
+
+    这条区分是刻意的：编辑的语义是"以这条分支为起点分叉"，而重新生成的语义是
+    "这个位置的另一种可能"。
+    """
+    if not reuse_chain:
+        # 编辑：当前分支就是分叉点
+        return current_branch or "main"
+    items = sessions.normalize_branches(
+        sessions.load_session_meta(session_name).get("branches"))
+    me = next((b for b in items if str(b["id"]) == str(current_branch)), None)
+    if me is None:
+        return current_branch or "main"
+    point = _fork_point_id(items, me)
+    if point != str(me["id"]):
+        # 当前分支本身就是某个分叉点的产物 → 归到同一组（链式替代）
+        return point
+    return current_branch or "main"
+
+
+def sibling_parent(session_name: str, current_branch: str, fork_index: int) -> str:
+    """在 ``fork_index`` 处分叉时，新分支的 parent 该填谁（= 分叉点）。
+
+    parent 与分叉点在这里取同一个值：新分支的"父"就是它分出来的那条分支。
+    """
+    return fork_point_for(session_name, current_branch, fork_index)
+
+
 def next_branch_id(session_name: str) -> str:
     """给新分支取新 ID：b2、b3……，只增不减（不复用被删掉的编号）。
 
@@ -26,27 +122,32 @@ def next_branch_id(session_name: str) -> str:
 
 
 def branch_siblings(session_name: str, branch_id: str) -> list:
-    """同一次分叉产生的兄弟分支（parent 与 fork_index 都相同的那些）。"""
-    items = sessions.normalize_branches(sessions.load_session_meta(session_name).get("branches"))
-    me = next((b for b in items if b["id"] == branch_id), None)
-    if me is None:
-        return [branch_id]
-    same = [b["id"] for b in items
-            if b.get("parent") == me.get("parent") and b.get("fork_index") == me.get("fork_index")]
-    return same or [branch_id]
+    """同一次分叉产生的兄弟分支（同一个分叉点分出来的那些），按创建顺序。
+
+    分组依据是**分叉点**而不是 parent —— 连续重新生成时分支是链式创建的
+    （b2.parent=main、b3.parent=b2、b4.parent=b3），按 parent 分组会把它们拆散，
+    箭头就只显示 1/1、切不过去（用户报的"分支似乎只能存在两个"）。
+    """
+    return group_members(session_name, branch_id)
 
 
-def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None) -> str:
+def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None,
+                fork_point=None) -> str:
     """新建一条分支并把 prefix(+seed) 写进去，返回新分支 ID。
 
     prefix 是新分支继承的消息前缀；seed 是分叉点那条被改写/重新生成的消息
     （编辑消息时传入，重新生成时传 None）。
+
+    fork_point 是"从哪条分支分出来的"。不传时退回 parent（老行为）——
+    调用方应当传 branches.fork_point_for(...) 的结果，否则连续重新生成会形成
+    链式 parent，兄弟关系就散了（箭头显示 1/1）。
     """
     sessions.migrate_session(session_name)
     branch_id = next_branch_id(session_name)
     meta = sessions.load_session_meta(session_name)
     meta["branches"] = sessions.normalize_branches(
-        [*sessions.normalize_branches(meta.get("branches")), sessions._branch(branch_id, parent, fork_index)]
+        [*sessions.normalize_branches(meta.get("branches")),
+         sessions._branch(branch_id, parent, fork_index, fork_point)]
     )
     meta["current_branch"] = branch_id
     messages = [dict(m) for m in prefix]

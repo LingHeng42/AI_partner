@@ -335,9 +335,13 @@ def regenerate(index: int) -> None:
     if not sid or not (0 <= index < len(messages)):
         return
     prefix = [dict(m) for m in messages[:index]]
+    # 分叉点显式沿用：用户连续点"重新生成"时，每次都是同一个分叉点上的另一种
+    # 可能，必须都记成同一个 fork_point，否则它们不互为兄弟、‹ 2/3 › 箭头出不来
+    # （这就是"分支似乎只能存在两个"的成因）。
+    point = branches.fork_point_for(
+        sid, st.session_state.get("current_branch") or "main", index)
     branch_id = branches.fork_branch(sid, prefix, seed=None,
-                            parent=st.session_state.get("current_branch") or "main",
-                            fork_index=index)
+                            parent=point, fork_index=index, fork_point=point)
     st.session_state.current_branch = branch_id
     st.session_state.message = [dict(m) for m in prefix]
     sessions.mark_message_owner(st.session_state.get("current_session"), branch_id)
@@ -373,9 +377,13 @@ def submit_edit(index: int, input_key: str) -> None:
     seed = dict(messages[index])
     seed["content"] = new_text
     seed.pop("reasoning_content", None)  # 改写过就不再保留旧的推理过程
+    # 编辑是"从这条分支出发分叉"（嵌套分叉）→ reuse_chain=False，
+    # 分叉点就是当前分支本身。这样在 b3 上编辑它的第 0 条不会并进 main 组。
+    point = branches.fork_point_for(
+        sid, st.session_state.get("current_branch") or "main", index,
+        reuse_chain=False)
     branch_id = branches.fork_branch(sid, prefix, seed=seed,
-                            parent=st.session_state.get("current_branch") or "main",
-                            fork_index=index)
+                            parent=point, fork_index=index, fork_point=point)
     st.session_state.current_branch = branch_id
     st.session_state.message = [*[dict(m) for m in prefix], dict(seed)]
     sessions.mark_message_owner(st.session_state.get("current_session"), branch_id)
