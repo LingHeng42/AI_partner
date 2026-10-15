@@ -1424,15 +1424,21 @@ app.render_reply(_Sink())
 check("新会话首次落盘后触发了重跑", len(reruns.calls) == 1, reruns.calls)
 check("重跑前会话已落盘", meta_of("2099-04-04_000000_000").exists())
 
-# 场景 2：已存在的会话继续聊天 → 不需要重跑
+# 场景 2：已存在的会话继续聊天 → 同样重跑（统一渲染路径，见下面的说明）
 reruns.calls.clear()
 app.st.session_state["message"].append({"role": "assistant", "content": "你好"})
 app.st.session_state["message"].append({"role": "user", "content": "继续"})
 app.client = FakeClient(completions=FakeCompletions())
 app.render_reply(_Sink())
-check("已有存档的会话继续聊天不重跑", len(reruns.calls) == 0, reruns.calls)
+# 现在**每一轮都重跑**，不只是首次落盘那一次：⋯ 菜单/分支箭头只在历史回放
+# （render_history）里画，而历史回放在脚本顶部就跑完了，画不到刚生成出来的回答。
+# 只有重跑一次让历史回放重新渲染，最新一轮才会当场带上操作入口。这条重跑不重新
+# 请求模型（回答已落盘），所以代价只是再渲染一次。
+check("已有存档的会话继续聊天也重跑一次（让最新一轮的 ⋯ 立刻出现）",
+      len(reruns.calls) == 1, reruns.calls)
 
-# 场景 3：全新会话 + 空回答 → 仍然会因为那条用户消息而首次落盘，所以要重跑一次
+# 场景 3：全新会话 + 空回答 → 用户消息必须落盘（否则这次失败会把整个会话连同
+#        输入一起弄丢），但**不重跑** —— 重跑会把 generate_reply 的错误提示冲掉。
 reruns.calls.clear()
 _clear_sessions()
 app.st.session_state["current_session"] = "2099-04-05_000000_000"
@@ -1440,13 +1446,14 @@ app.st.session_state["message"] = [{"role": "user", "content": "空回答"}]
 app.client = FakeClient(completions=FakeCompletions(empty=True))
 app.render_reply(_Sink())
 check("全新会话的空回答也会落盘（用户消息在）", meta_of("2099-04-05_000000_000").exists())
-check("全新会话的空回答同样重跑一次", len(reruns.calls) == 1, reruns.calls)
+check("全新会话的空回答不重跑（保住错误提示）", len(reruns.calls) == 0, reruns.calls)
 
 # 场景 4：完全没有消息 → 不落盘也不重跑
 reruns.calls.clear()
 _clear_sessions()
 app.st.session_state["current_session"] = "2099-04-06_000000_000"
 app.st.session_state["message"] = []
+app.client = FakeClient(completions=FakeCompletions(empty=True))
 app.render_reply(_Sink())
 check("无消息时不落盘", session_dirs() == [], session_dirs())
 check("无消息时不重跑", len(reruns.calls) == 0, reruns.calls)

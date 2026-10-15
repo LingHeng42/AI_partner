@@ -311,17 +311,36 @@ def remember_reply(full_response: str, reasoning: str) -> None:
 
 
 def render_reply(placeholder) -> None:
-    """用户发消息后的回答：生成 → 追加到当前分支 → 落盘。"""
+    """用户发消息后的回答：生成 → 追加到当前分支 → 落盘 → **统一重跑一次**。
+
+    "最新一轮没有 ⋯"的根因就在这个函数：历史回放（render_history）在本轮脚本里
+    是**在用户这条消息之前**跑的，它不可能画到刚生成出来的回答；而辅助控件
+    （⋯ 菜单 / 分支箭头 / 重新生成）只在历史回放里画。于是最新一轮永远缺这些入口，
+    必须等下一次重跑（切一次会话、刷新、或再发一条）才补上。
+
+    修法是让两个时候**渲染同一套东西**：生成并落盘后主动重跑一次，下一轮由历史
+    回放统一画出完整的、带控件的消息列表。副作用是"内容不再重复显示" —— 流式
+    内容随本轮结束被清理掉，正好不会和回放出来的内容重叠。
+
+    成本很低：重跑不重新请求模型（生成已经结束、内容已落盘），只是把同一份内容
+    再渲染一次；这也是新建会话时早就在走的同一条路。
+    """
     full_response, reasoning = generate_reply(placeholder, st.session_state.message)
     remember_reply(full_response, reasoning)
 
-    existed = sessions.session_file_exists()
+    # 无论回答成功与否都先落盘：用户这条消息必须durable（尤其是新会话的第一条 ——
+    # 不落盘的话这次失败会让整个会话连同用户输入一起消失）。
     sessions.save_session()
-    if not existed and sessions.session_file_exists():
-        # 本次是这条会话的第一个存档：侧边栏是在本轮脚本顶部渲染的，那时文件还
-        # 不存在，所以必须主动重跑一次，会话才会立刻出现在会话历史里。
-        # （不能只依赖 chat_input 提交后浏览器的隐式重跑，实测它不保证发生。）
-        st.rerun()
+
+    if not full_response:
+        # 生成失败：没有新回答，也就没有"最新一轮缺 ⋯"的问题；而且这里**不能重跑** ——
+        # generate_reply 刚 st.error 出来的提示会随本轮作废，用户什么都看不到。
+        return
+
+    # 成功才重跑：让历史回放（render_history）在下一轮统一画出带 ⋯ / 分支箭头的
+    # 完整消息列表 —— 它在本轮脚本里跑在用户这条消息之前，画不到刚生成的回答。
+    st.rerun()
+    return  # st.rerun() 正常会抛异常终止本轮；显式 return 让它在测试替身下也停下
 
 
 def regenerate(index: int) -> None:
@@ -393,18 +412,21 @@ def submit_edit(index: int, input_key: str) -> None:
 
 
 def render_pending_regen() -> None:
-    """页面主体：处理"重新生成"标记（回调阶段不发起流式请求）。"""
+    """页面主体：处理"重新生成"标记（回调阶段不发起流式请求）。
+
+    和 render_reply 一样，生成完统一重跑一次：历史回放是在脚本顶部跑的，那时这条
+    新回答还不存在，不重跑就会出现"有内容、但没有下面的 ⋯ 操作入口"。
+    """
     if not st.session_state.get("pending_regen"):
         return
     st.session_state.pending_regen = False
     full_response, reasoning = generate_reply(st.empty(), st.session_state.message)
     remember_reply(full_response, reasoning)
     if not full_response:
-        # 生成失败：保留"前缀 + 分叉点内容"这个状态，用户可以直接重试
+        # 生成失败：没有新消息可回放，也就没有"缺少 ⋯"的问题；而且**不能重跑**，
+        # 否则 generate_reply 刚 st.error 出来的提示会随本轮作废。
         return
     sessions.save_session()
-    # 历史是在脚本顶部渲染的，那时这条新回答还没生成：不重跑一次的话，
-    # 它会带着内容显示出来、但没有下面的 ⋯ 操作入口（要刷新才出现）。
     st.rerun()
 
 
@@ -460,52 +482,75 @@ def render_history() -> None:
             else:
                 if msg.get("content"):
                     st.markdown(msg["content"])
-                with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
-                                help="编辑这条消息；最后一条回答还能重新生成"):
-                    if index == last and msg.get("role") == "assistant":
-                        st.button(
-                            "重新生成",
-                            key=f"regen_{branch}_{index}",
-                            width="stretch",
-                            icon=":material/refresh:",
-                            on_click=regenerate,
-                            args=(index,),
-                        )
-                    st.button(
-                        "编辑这条",
-                        key=f"edit_{branch}_{index}",
-                        width="stretch",
-                        icon=":material/edit:",
-                        on_click=start_edit,
-                        args=(index,),
-                    )
-                    # 分支切换箭头：只在同源分支之间循环（‹ 2/3 ›）
-                    # 必须走 pending 路由（只登记、主脚本体里执行）：switch_branch
-                    # 会改 st.session_state.current_branch，而回调里的状态变更会被
-                    # Streamlit 回滚 —— 直接当回调用会出现"点了箭头没反应/内容不对"。
-                    if len(siblings) > 1:
-                        position = siblings.index(branch) if branch in siblings else 0
-                        prev_branch = siblings[(position - 1) % len(siblings)]
-                        next_branch = siblings[(position + 1) % len(siblings)]
-                        nav = st.columns([1, 2, 1], vertical_alignment="center")
-                        with nav[0]:
-                            st.button(
-                                "", key=f"branch_prev_{branch}_{index}",
-                                icon=":material/chevron_left:",
-                                help=f"切到 {prev_branch}",
-                                on_click=sessions.request_switch_branch,
-                                args=(st.session_state.current_session, prev_branch),
-                            )
-                        with nav[1]:
-                            st.caption(f"分支 {position + 1}/{len(siblings)}")
-                        with nav[2]:
-                            st.button(
-                                "", key=f"branch_next_{branch}_{index}",
-                                icon=":material/chevron_right:",
-                                help=f"切到 {next_branch}",
-                                on_click=sessions.request_switch_branch,
-                                args=(st.session_state.current_session, next_branch),
-                            )
+                _render_message_actions(branch, index, last, siblings)
+
+def _siblings_for(branch: str) -> list:
+    """当前分支所在的分叉组（没有存档时就是它自己）。"""
+    if sessions.session_file_exists():
+        return branches.branch_siblings(st.session_state.current_session, branch)
+    return [branch]
+
+
+def _render_message_actions(branch: str, index: int, last: int, siblings: list) -> None:
+    """一条消息的操作入口：⋯ 菜单（编辑/重新生成）与分支切换箭头。
+
+    **必须由"历史回放"和"刚刚生成完的那轮"共用。** 以前只有历史回放里画这些，
+    于是刚发完消息时最新一轮没有 ⋯ —— 要等下一次重跑（比如切一次会话）才补上。
+    """
+    with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
+                    help="编辑这条消息；最后一条回答还能重新生成"):
+        if index == last and st.session_state.message[index].get("role") == "assistant":
+            st.button(
+                "重新生成",
+                key=f"regen_{branch}_{index}",
+                width="stretch",
+                icon=":material/refresh:",
+                on_click=regenerate,
+                args=(index,),
+            )
+        st.button(
+            "编辑这条",
+            key=f"edit_{branch}_{index}",
+            width="stretch",
+            icon=":material/edit:",
+            on_click=start_edit,
+            args=(index,),
+        )
+    _render_branch_arrows(branch, index, siblings)
+
+
+def _render_branch_arrows(branch: str, index: int, siblings: list) -> None:
+    """分支切换箭头（‹ 2/3 ›）：只在同一个分叉点的兄弟之间循环。
+
+    必须走 pending 路由（只登记、主脚本体里执行）：switch_branch 会改
+    st.session_state.current_branch，而回调里的状态变更会被 Streamlit 回滚 ——
+    直接当回调用会出现"点了箭头没反应/内容不对"。
+    """
+    if len(siblings) <= 1:
+        return
+    position = siblings.index(branch) if branch in siblings else 0
+    prev_branch = siblings[(position - 1) % len(siblings)]
+    next_branch = siblings[(position + 1) % len(siblings)]
+    nav = st.columns([1, 2, 1], vertical_alignment="center")
+    with nav[0]:
+        st.button(
+            "", key=f"branch_prev_{branch}_{index}",
+            icon=":material/chevron_left:",
+            help=f"切到 {prev_branch}",
+            on_click=sessions.request_switch_branch,
+            args=(st.session_state.current_session, prev_branch),
+        )
+    with nav[1]:
+        st.caption(f"分支 {position + 1}/{len(siblings)}")
+    with nav[2]:
+        st.button(
+            "", key=f"branch_next_{branch}_{index}",
+            icon=":material/chevron_right:",
+            help=f"切到 {next_branch}",
+            on_click=sessions.request_switch_branch,
+            args=(st.session_state.current_session, next_branch),
+        )
+
 
 def format_reasoning_html(text: str, streaming: bool = False) -> str:
     """把推理内容包装成紧凑样式的 HTML，流式时带光标。"""
