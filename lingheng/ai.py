@@ -365,6 +365,10 @@ def regenerate(index: int) -> None:
     st.session_state.message = [dict(m) for m in prefix]
     sessions.mark_message_owner(st.session_state.get("current_session"), branch_id)
     st.session_state.pending_regen = True
+    # 记进"最近动作"面板：排查"点了没有分支"时，第一件事就是确认这个回调到底跑没跑
+    sessions.note_action(
+        f"回调：重新生成第 {index} 条 → 新建 {branch_id}"
+        f"（分叉点 {point}／第 {index} 条）")
 
 
 def start_edit(index: int) -> None:
@@ -409,6 +413,9 @@ def submit_edit(index: int, input_key: str) -> None:
     st.session_state.editing_index = None
     # 改的是用户消息 → 需要模型接着回答；改的是 AI 回复 → 他自己写了内容，不再生成
     st.session_state.pending_regen = seed.get("role") == "user"
+    sessions.note_action(
+        f"回调：编辑第 {index} 条 → 新建 {branch_id}"
+        f"（分叉点 {point}／第 {index} 条，{seed.get('role')}）")
 
 
 def render_pending_regen() -> None:
@@ -440,8 +447,13 @@ def render_history() -> None:
     """
     branch = st.session_state.get("current_branch") or "main"
     siblings = _siblings_for(branch)
-    forked_at = _fork_index_for(branch) if len(siblings) > 1 else None
     last = len(st.session_state.message) - 1
+    forked_at = _fork_index_for(branch) if len(siblings) > 1 else None
+    if len(siblings) > 1 and forked_at is None:
+        # 兄弟组是有的，但"从第几条分的"算不出来（老存档连 fork_index 都没有）。
+        # 这时画在最后一条上：位置不精确，但远好过"整个没有切换入口" ——
+        # 用户会把完全看不到箭头理解成"编辑根本没建分支"。
+        forked_at = last
     for index, msg in enumerate(st.session_state.message):
         with st.chat_message(msg["role"], avatar=images.current_avatar(msg["role"])):
             if msg.get("reasoning_content"):
@@ -492,12 +504,15 @@ def _siblings_for(branch: str) -> list:
     return [branch]
 
 
-def _fork_index_for(branch: str) -> int:
-    """当前兄弟组在哪一条消息处分叉（箭头只画在那一条下面）。"""
+def _fork_index_for(branch: str) -> int | None:
+    """当前兄弟组在哪一条消息处分叉（箭头只画在那一条下面）。
+
+    算不出来时返回 None（调用方会退化成"画在最后一条"），**不能**返回 0 或 -1：
+    那样会在不存在的序号上比较，``index == forked_at`` 永远不成立 → 箭头一个都不画。
+    """
     if not sessions.session_file_exists():
-        return -1
-    index = branches.group_fork_index(st.session_state.current_session, branch)
-    return -1 if index is None else index
+        return None
+    return branches.group_fork_index(st.session_state.current_session, branch)
 
 
 def _render_message_actions(branch: str, index: int, last: int, siblings: list,

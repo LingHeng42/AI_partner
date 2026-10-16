@@ -10,5 +10,5 @@ GitHub 的 commit 号在页面上看不见，而 Streamlit Cloud 的日志只告
 - BUILD 写这次改的是什么，便于对照
 """
 
-VERSION = "2.1.4"
-BUILD = "修「修改留言内容不能创建分支」：源分支也进兄弟组、箭头只画在分叉点那一条"
+VERSION = "2.1.5"
+BUILD = "嵌套分叉的箭头位置修正；排查面板摊出每条分支的 fork_index／兄弟组／箭头位置"

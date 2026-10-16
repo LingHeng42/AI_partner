@@ -220,6 +220,45 @@ check("空会话也不崩", isinstance(branches.fork_point_for("空的", "main",
 check("未知分支的兄弟集合是它自己",
       branches.branch_siblings(SID3, "不存在的分支") == ["不存在的分支"])
 
+# --------------------------------------------------------------------------- #
+# 5. 箭头画在哪一条：必须是"**定义这一组**的那个位置"
+# --------------------------------------------------------------------------- #
+# 曾经的判据是"组内 fork_index 的最小值"，嵌套分叉时会画错地方：
+# 在 b2 的第 3 条编辑出 b3 时，组是 {b2, b3}，而 b2 自己的 fork_index 是它当年从
+# main 分出来的位置（1）—— min 取到 1，箭头跑到第 1 条下面去了，而第 1 条正是
+# b2/b3 **共有**的前缀（它们从第 3 条才开始不一样）。用户看到的是"箭头在，但位置
+# 不对/以为没分叉"。
+SID4 = "2093-01-01_000000_000"
+new_session(SID4)
+d1 = fork(SID4, 1, chain=False)          # main 的第 1 条 → d1
+d2 = fork(SID4, 3, chain=False)          # d1 的第 3 条 → d2（嵌套）
+check("嵌套编辑创建了 d1/d2", [d1, d2] == ["b2", "b3"], [d1, d2])
+check("d1 那一组的箭头画在第 1 条（它自己分出来的位置）",
+      branches.group_fork_index(SID4, d1) == 1,
+      branches.group_fork_index(SID4, d1))
+check("**d2 那一组画在第 3 条**（不是它父分支 d1 当年分出来的第 1 条）",
+      branches.group_fork_index(SID4, d2) == 3,
+      (branches.group_fork_index(SID4, d2), branches.group_members(SID4, d2)))
+check("d2 的组仍然是 {d1, d2}",
+      branches.group_members(SID4, d2) == [d1, d2], branches.group_members(SID4, d2))
+
+# --------------------------------------------------------------------------- #
+# 6. 排查面板：分支状态摊平（用户复制一屏就能定位"编辑后没有分支"）
+# --------------------------------------------------------------------------- #
+desc = branches.describe(SID4, d2)
+check("describe() 打出构建版本（能确认线上跑的是哪一版）",
+      "构建" in desc, desc.splitlines()[0] if desc else "")
+check("describe() 列出每条分支的 fork_index / fork_point",
+      all(k in desc for k in ("fork_index=", "fork_point=", "parent=")), desc)
+check("describe() 直接给出兄弟组与箭头位置",
+      "兄弟组（2）" in desc and "箭头画在第 3 条" in desc, desc)
+check("只有一条分支时 describe() 说明为什么不画箭头",
+      "只有一条" in branches.describe(SID2, "main") or
+      "只有一条" in branches.describe("不存在的会话", "main"),
+      branches.describe("不存在的会话", "main"))
+check("describe() 对不存在的会话不抛异常",
+      isinstance(branches.describe("不存在的会话", "main"), str))
+
 print()
 print("FAILURES:", failures if failures else "none")
 sys.exit(1 if failures else 0)

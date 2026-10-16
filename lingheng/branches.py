@@ -171,17 +171,92 @@ def branch_siblings(session_name: str, branch_id: str) -> list:
 def group_fork_index(session_name: str, branch_id: str) -> int | None:
     """这个兄弟组在**第几条消息**处分叉（箭头画在那一条下面）。
 
-    取组内最小的 ``fork_index``，而不是"当前分支自己的"：源分支（main）不是分叉
-    产生的、本身没有 fork_index，而组里又可能同时存在从第 0 条和第 1 条改出来的
-    分支。箭头要画在**最早那个分叉位置**，也就是源分支与所有改写版本共享前缀的
-    终点 —— 画在别处会让人以为"后面那条消息也分了叉"。
+    必须是"定义这一组的那个位置"，也就是 ``group_members`` 里用的 anchor_index，
+    规则分两种（与分组规则严格一致）：
+
+    - 我是分叉产物 → 就是我自己的 ``fork_index``
+      （连着重新生成时 b2/b3/b4 的 fork_index 都相同，谁都是同一个值）
+    - 我是源分支（main）→ 取"从我分出去的最早那个位置"
+      （main 自己不是分叉产生的、没有 fork_index，箭头得画在子分支分出来的地方）
+
+    ⚠️ 以前写成"组内 fork_index 的最小值"，嵌套分叉时会画错位置：
+    在 b2 的第 3 条编辑出 b3 时，组是 {b2, b3}，而 b2 自己的 fork_index 是它当年
+    从 main 分出来的位置（比如 1）—— min 取到 1，箭头就跑到第 1 条下面去了，
+    而那一条正是 b2/b3 **共有**的前缀（它们从第 3 条才开始不同）。
     """
     items = sessions.normalize_branches(
         sessions.load_session_meta(session_name).get("branches"))
-    members = {str(x) for x in group_members(session_name, branch_id)}
-    indexes = [int(b["fork_index"]) for b in items
-               if str(b["id"]) in members and b.get("fork_index") is not None]
-    return min(indexes) if indexes else None
+    me = next((b for b in items if str(b["id"]) == str(branch_id)), None)
+    if me is None:
+        return None
+    my_id = str(me["id"])
+    if str(_fork_point_id(items, me)) != my_id:
+        index = me.get("fork_index")
+        return int(index) if index is not None else None
+    kids = [b for b in items
+            if _fork_point_id(items, b) == my_id and b.get("fork_index") is not None]
+    return min((int(b["fork_index"]) for b in kids), default=None)
+
+
+def describe(session_name: str = None, branch_id: str = None) -> str:
+    """把当前会话的分支状态摊平成一屏文本（排查"编辑后没有分支"用）。
+
+    用户看到的只是"编辑了却没有分支/没有箭头"，但至少有四种完全不同的原因，在
+    界面上长得一模一样：
+
+    1. 分支根本没写进 meta（回调没执行 / 写入失败）
+    2. ``fork_index`` 丢了 → 兄弟组算出来了，但不知道画在第几条，箭头整个不渲染
+    3. 兄弟组算出来只有它自己（分叉点对不上）→ ``len(siblings) <= 1`` 直接不画
+    4. 箭头画在了别的序号上（用户看着那一条，以为没有）
+
+    猜是猜不出来的（这三种现象一模一样），所以把这些中间值直接摊出来：用户复制
+    这一屏，原因当场就定了。
+    """
+    from ._deploy_stamp import BUILD, VERSION
+
+    lines = [f"构建 {VERSION} · {BUILD}"]
+    try:
+        sid = session_name or st.session_state.get("current_session")
+    except Exception:  # noqa: BLE001 - 极端情况下没有 session_state
+        sid = session_name
+    lines.append(f"会话：{sid}")
+    if not sid:
+        return "\n".join(lines + ["（还没有会话）"])
+    try:
+        meta = sessions.load_session_meta(sid)
+        items = sessions.normalize_branches(meta.get("branches"))
+        disk_branch = meta.get("current_branch") or "main"
+    except Exception as exc:  # noqa: BLE001
+        return "\n".join(lines + [f"读 meta 失败：{type(exc).__name__}: {exc}"])
+    try:
+        mem_branch = st.session_state.get("current_branch")
+    except Exception:  # noqa: BLE001
+        mem_branch = None
+    lines.append(f"磁盘当前分支：{disk_branch}／内存当前分支：{mem_branch}")
+    now = str(branch_id or mem_branch or disk_branch)
+    for b in items:
+        bid = str(b["id"])
+        try:
+            count = len(sessions.read_branch(sid, bid).get("message", []))
+        except Exception as exc:  # noqa: BLE001 - 读不出来就照实说
+            count = f"读不出来（{type(exc).__name__}）"
+        lines.append(
+            f"  {bid}{' ←当前' if bid == now else ''}："
+            f"parent={b.get('parent')} fork_index={b.get('fork_index')} "
+            f"fork_point={b.get('fork_point')}（算作 {_fork_point_id(items, b)}）"
+            f" 消息 {count} 条")
+    try:
+        group = group_members(sid, now)
+        index = group_fork_index(sid, now)
+    except Exception as exc:  # noqa: BLE001
+        return "\n".join(lines + [f"算兄弟组失败：{type(exc).__name__}: {exc}"])
+    lines.append(f"兄弟组（{len(group)}）：{group}")
+    if len(group) <= 1:
+        lines.append("→ 只有一条，按规则不画箭头（这就是「没有分支」的直接原因）")
+    else:
+        lines.append(f"→ 箭头画在第 {index} 条消息下面"
+                     + ("（**位置算不出来**，箭头不会渲染）" if index is None else ""))
+    return "\n".join(lines)
 
 
 def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None,

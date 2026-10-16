@@ -151,6 +151,13 @@ def _render_activity_log() -> None:
     """
     with st.expander("排查：最近动作", expanded=False, icon=":material/bug_report:"):
         st.caption(f"当前会话指针：{st.session_state.get('current_session')}")
+        # 分支状态（当前值，不是日志）：排查"编辑了却没有分支/没有箭头"。
+        # 必须单独摊出来 —— "分支没写进 meta""fork_index 丢了""兄弟组只有它自己"
+        # "箭头画在别的序号上"这四种原因在界面上长得完全一样，只能看中间值。
+        try:
+            st.code(branches.describe(), language="text")
+        except Exception as exc:  # noqa: BLE001 - 诊断面板本身绝不能把页面弄崩
+            st.caption(f"分支状态读不出来：{type(exc).__name__}: {exc}")
         recent = sessions.RECENT_ACTIONS
         if recent:
             st.code("\n".join(recent), language="text")
