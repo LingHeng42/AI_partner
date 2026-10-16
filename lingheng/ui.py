@@ -44,6 +44,9 @@ def _render_login() -> None:
             "所以谁都无法登录。请检查 requirements.txt 与 secrets 里的 "
             "`AUTH_CREDENTIALS` / `COOKIE_KEY`。"
         )
+        # 读 secrets 时的具体报错要说出来：这是"登录门控为什么打不开"的唯一线索
+        if auth.SECRETS_ERROR:
+            st.caption(f"读取 secrets 的情况：{auth.SECRETS_ERROR}")
         st.stop()
     auth.do_login()
     if not auth.current_user():
@@ -200,6 +203,58 @@ def _render_boot_marker() -> None:
     st.caption(f":material/check_circle: 应用已加载 · 版本 {_deploy_stamp.VERSION} · {now}")
 
 
+#: 同一个浏览器换账号（或退出后换人登录）时必须清掉的内存态：**键 → 重置成什么值**。
+#:
+#: 这里装的都是"属于上一个账号"的东西：会话指针与消息、待办动作标记、
+#: **用户自己填的 API Key**、以及按会话缓存的模型客户端。
+#: 留任何一个都是事故：下一个人进来看见上一个人的对话、或者直接拿上一个人的 Key 去问。
+#:
+#: 为什么写"重置值"而不是一律置 None：主脚本体里那段默认值初始化（`_default`）
+#: 只补**缺失**的键，已经存在（值是 None）的键它管不了。于是 `message` 会以 None
+#: 的身份活到渲染层，而 `current_session` 也不会被换成新 ID —— 主区域拿着
+#: "None 当消息列表 / None 当会话 ID"去渲染，正好在这个人刚登录时炸给他看。
+ACCOUNT_SCOPED_STATE = {
+    "session_title": store.DEFAULT_SESSION_TITLE,
+    "session_pinned": False,
+    "current_branch": "main",
+    sessions.OWNER_STATE: None,
+    "message": [],
+    "pending_regen": False,
+    "editing_index": None,
+    ai.USER_KEY_STATE: None,
+    ai.CLIENT_STATE: None,
+    sessions.PENDING_DELETE: None,
+    sessions.PENDING_NEW: None,
+    sessions.PENDING_LOAD: None,
+    sessions.PENDING_BRANCH: None,
+    sessions.PENDING_BRANCH_DELETE: None,
+    sessions.PENDING_BRANCH_RENAME: None,
+}
+
+#: 会话指针单独处理：要换成**一个全新的会话 ID**，而不是 None。
+#:
+#: 不能留 None：ui.main() 里"没有 current_session 就新建一个"用的是
+#: `"current_session" not in session_state`，键在（值是 None）时它不会动手，
+#: 主区域于是拿着 None 当会话 ID 去读分支。
+CURRENT_SESSION_KEY = "current_session"
+
+
+def clear_account_state() -> None:
+    """清掉上一个账号留在浏览器会话里的一切（磁盘上的数据本来就按用户分区）。
+
+    单独抽成函数是为了能直接测：以前这段逻辑内联在 main() 里，只能靠读源码断言，
+    删掉其中任意一个键都不会有测试报警。
+    """
+    for key, value in ACCOUNT_SCOPED_STATE.items():
+        st.session_state[key] = value
+    # 会话指针：换成全新 ID（与删除当前会话后的做法一致，见 sessions.delete_session）
+    st.session_state[CURRENT_SESSION_KEY] = store.new_session_id()
+    # 头像缓存、人设、高级参数：都属于上一个账号的会话，恢复默认。
+    images.clear_image_cache()
+    sessions.reset_profile()
+    sessions.reset_avatar()
+
+
 def main() -> None:
     _page_config()
     _render_boot_marker()    # 存活标记：先证明"应用跑起来了"
@@ -221,18 +276,21 @@ def main() -> None:
         st.stop()
     storage.set_current_uid(uid or "local")
 
+    # 同一个浏览器换了账号（或退出后换人登录）时，清掉上一个账号留在内存里的一切。
+    #
+    # ⚠️ 必须紧跟 set_current_uid、并且排在 run_pending_actions **之前**：
+    #   ① 这个窗口里的会话态还属于上一个账号，任何存储读写都可能串到别人名下
+    #   ② 待办动作要作用在"新账号的指针"上，不能被后面的清理抹掉
+    #      （反过来说，上一个账号登记的待办动作也不该落到新账号头上）
+    # 磁盘上的数据本来就按用户隔离，这里只是不让上一个账号的东西"接着显示/接着用"。
+    if st.session_state.get("_uid") not in (None, uid):
+        clear_account_state()
+    st.session_state["_uid"] = uid
+
     # 待执行动作（新建/删除会话）要在渲染与存储读写之前处理：它们会改
     # current_session，而回调里的这类变更会被 Streamlit 回滚，导致删了还在。
-    # 注意必须放在 set_current_uid **之后**（见上）。
+    # 注意必须放在 set_current_uid 与上面的换账号清理**之后**。
     sessions.run_pending_actions()
-
-    # 同一个浏览器换了账号时，清掉上一个账号的会话态，避免界面串位
-    # （磁盘上的数据本来就按用户隔离，这里只是不让内存里的旧会话"接着显示"）
-    if st.session_state.get("_uid") not in (None, uid):
-        for _key in ("current_session", "session_title", "current_branch",
-                     sessions.OWNER_STATE, "message", "pending_regen", "editing_index"):
-            st.session_state[_key] = None
-    st.session_state["_uid"] = uid
 
     # 会话状态初始化。
     # ⚠️ 必须用 `if key in session_state` + 下标赋值，**不能**用

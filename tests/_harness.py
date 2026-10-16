@@ -27,6 +27,18 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT = TESTS_DIR.parent
+
+# 控制台编码：Windows 默认是 GBK，而测试消息里会带界面原文（例如侧边栏的
+# 「⚙️ 高级配置」）。GBK 编不出来的字符会让 print 直接抛 UnicodeEncodeError ——
+# 一整套本来全绿的断言因此变成"失败"，而且在那一行就中断，后面的断言根本没跑
+# （排查时最容易被这个假失败带偏）。统一改成 UTF-8；万一流不支持 reconfigure，
+# 也把编不出来的字符退化成替换符，总之不许因为一个图标中断测试。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - 老解释器或被包装过的流没有 reconfigure
+        pass
+
 # 临时根目录默认是 tests/.tmp。可以用 AI_PARTNER_TEST_TMP 覆盖 —— 这**不是**可选
 # 的装饰：reset_tmp() 会清空整个 TMP_DIR，所以任何"再起一个子进程来跑应用/测试"的
 # 用例都必须给子进程一个独立的根目录，否则子进程会把**父测试正在用的存档目录一起

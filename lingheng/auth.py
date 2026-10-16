@@ -50,6 +50,16 @@ def auth_enabled() -> bool:
 
     测试用 ``AI_PARTNER_DISABLE_AUTH=1`` 显式关掉门控：测试不该依赖（也不该被）
     开发者本机的 secrets 影响 —— 本地一旦有 secrets.toml，界面类测试就会停在登录页。
+
+    ⚠️ **读不到凭据表不等于"没配登录"**。这两件事必须分开（见 _secrets_probe）：
+
+    - 压根没有 secrets 文件 → 本地开发，不配登录是正常的 → 不做门控
+    - 有 secrets 却读不到凭据表（TOML 写错 / 键名写错 / 漏配 AUTH_CREDENTIALS）
+      → **当作"配了登录但坏了"**：门控照旧打开，但没人能登录，页面会明确报出错在哪。
+
+    为什么必须这样：以前是 ``bool(_credentials_raw())``，于是线上 secrets 一旦读不出来，
+    登录门控会**整个消失** —— 任何访客都能进，而且所有人都被当成用户名 "local"，
+    共用同一个 users/local 分区，能看到彼此的会话。这比"打不开"严重得多。
     """
     override = _runtime_override("AUTH_ENABLED")
     if override is not None:
@@ -57,7 +67,34 @@ def auth_enabled() -> bool:
     disabled = str(os.environ.get("AI_PARTNER_DISABLE_AUTH") or "").strip().lower()
     if disabled in ("1", "true", "yes"):
         return False
-    return bool(_credentials_raw())
+    if _credentials_raw():
+        return True
+    return _auth_intended()
+
+
+def _secrets_probe() -> tuple:
+    """看一看 secrets 到底处于哪种状态，返回 ``(有内容, 读取出错)``。
+
+    三种情况以前被混成一种（都只是 ``SECRETS_ERROR`` 一句话），故障因此被完全掩盖：
+      - ``(False, False)`` 没有 secrets 文件 → 本地开发
+      - ``(True, True)``   有 secrets 但解析不了（TOML 写错）→ 配置坏了
+      - ``(True, False)``  有 secrets 内容，只是没有凭据那一段 → 配置不完整
+    """
+    try:
+        keys = list(st.secrets.keys())
+    except FileNotFoundError:  # 没有 secrets 文件（含 StreamlitSecretNotFoundError）
+        return False, False
+    except Exception:  # noqa: BLE001 - 有文件但读不出来：TOML 语法错等
+        return True, True
+    return bool(keys), False
+
+
+def _auth_intended() -> bool:
+    """是否"本来该有登录配置"：有 secrets 却拿不到凭据表。"""
+    if _runtime_override("AUTH_CREDENTIALS_RAW") is not None:
+        return False  # 显式注入的凭据就是全部配置，没有就不算"漏配"
+    present, broken = _secrets_probe()
+    return bool(present or broken)
 
 
 # 上一次读取 secrets 时遇到的问题（供界面展示）。

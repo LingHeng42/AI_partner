@@ -271,12 +271,25 @@ sys.path.insert(0, str(PROJECT))
 import AI_partner as app  # noqa: E402
 
 check("import 成功（假 streamlit/openai）", True)
-check("客户端使用 DeepSeek base_url", app.client.init_kwargs["base_url"] == "https://api.deepseek.com")
-# 注：app.client 是**导入时**用当时的环境变量构造的，后面这段测试会把
-# DEEPSEEK_API_KEY 临时弹掉，所以这里只断言"确实拿到了一个 key"。
-check("导入时用上了环境变量里的 key",
-      str(app.client.init_kwargs.get("api_key", "")).startswith("sk-"),
-      {k: (str(v)[:8] + "...") for k, v in app.client.init_kwargs.items()})
+# 客户端**不再**是"导入时就建好"的模块全局：ui.main() 每次重跑都会按当前用户/
+# 会话的 key 新建一个，然后存进**浏览器会话**的 session_state（ai.CLIENT_STATE）。
+# 模块级 ai.client 只剩"不在脚本上下文里"时的兜底，导入时它是 None。
+#
+# 所以这里按应用自己的两个入口验证：get_client() 的构造参数、configure_client()
+# 与 _client() 的一进一出。
+# ⚠ 别写成 app._client()：入口模块的属性代理按 MODULE_ORDER 找，storage._client
+# 排在前头，拿到的是 **Mongo 客户端**（在没配 URI 的环境里直接 ConfigurationError）。
+from lingheng import ai as ai_mod  # noqa: E402
+
+_boot_client = ai_mod.get_client("sk-test-boot")
+check("客户端使用 DeepSeek base_url",
+      _boot_client.init_kwargs["base_url"] == "https://api.deepseek.com")
+check("客户端带上了传入的 key",
+      str(_boot_client.init_kwargs.get("api_key", "")).startswith("sk-"),
+      {k: (str(v)[:8] + "...") for k, v in _boot_client.init_kwargs.items()})
+# 身份不能存进程级全局：设进去的客户端必须能按"本次浏览器会话"取回来。
+ai_mod.configure_client(_boot_client)
+check("configure_client()/_client() 一进一出", ai_mod._client() is _boot_client)
 
 # --------------------------------------------------------------------------- #
 # API Key 读取：.env 回退 + 缺失时的提示分支

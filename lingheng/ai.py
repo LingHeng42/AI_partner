@@ -8,24 +8,43 @@ from openai import OpenAI
 
 from . import auth, branches, config, images, profile, sessions, storage, store
 
-# 当前使用的模型客户端。由 ui.main() 每次重跑时通过 configure_client() 设置；
-# 测试可以直接替换它（或替换入口模块上的 client，见 _client()）。
+# 当前使用的模型客户端。
+#
+# ⚠️ 这里只能当**兜底**，不能当"当前会话的客户端"。模块级全局是所有浏览器会话、
+# 所有线程共用的：两个人（或同一个人的两个标签页）同时用时，后一次 ui.main() 的
+# configure_client() 会把前一个人**正在流式请求**的客户端换掉，于是"A 的提问用
+# B 的 Key 发出去"——花错人的钱，还把 A 的提问记到 B 的额度上。
+# 这跟 `users/local` 是同一类 bug：**身份不能存进程级全局**。
+# 真正的存放处是浏览器会话自己的 session_state（见 CLIENT_STATE），
+# 这个全局只留给"不在脚本上下文里"的调用方（工具脚本、测试里的老写法）。
 client = None
+
+# 本次浏览器会话要用的模型客户端（存在 session_state 里，按会话隔离）
+CLIENT_STATE = "_model_client"
 
 # 用户自己填的 DeepSeek Key 存在这里（**只在内存里**，不落盘、不进数据库、不进日志）。
 USER_KEY_STATE = "user_api_key"
 
 
 def configure_client(new_client) -> None:
-    """设置本次脚本运行使用的客户端（ui.main() 每次重跑都会调一次）。"""
+    """设置**本次浏览器会话**使用的客户端（ui.main() 每次重跑都会调一次）。
+
+    写 session_state 而不是模块全局（原因见上面 client 的说明）。
+    取不到 session_state 时（不在脚本上下文里，例如工具脚本）才退回模块全局，
+    保证老用法仍然可用。
+    """
     global client
-    client = new_client
+    try:
+        st.session_state[CLIENT_STATE] = new_client
+        return
+    except Exception:  # noqa: BLE001 - 不在 Streamlit 脚本上下文里（测试/工具）
+        client = new_client
 
 
 def _client():
-    """取模型客户端。
+    """取模型客户端。优先级：入口模块的覆盖值 → 本次会话的 → 模块全局兜底。
 
-    优先用"入口模块上的覆盖值"：测试会写 ``app.client = 假客户端``，而 Python 的
+    第一优先是"入口模块上的覆盖值"：测试会写 ``app.client = 假客户端``，而 Python 的
     模块不支持 __setattr__，那个赋值只落在入口模块自己的 __dict__ 里，所以要回头看一次。
     """
     entry = sys.modules.get("AI_partner")
@@ -33,6 +52,12 @@ def _client():
         override = getattr(entry, "client", None)
         if override is not None:
             return override
+    try:
+        mine = st.session_state.get(CLIENT_STATE)
+    except Exception:  # noqa: BLE001 - 不在脚本上下文里
+        mine = None
+    if mine is not None:
+        return mine
     return client
 
 
@@ -390,13 +415,11 @@ def _bind_callback_uid(what: str) -> bool:
     或别人的分区。表现就是用户反复报的那句"**保存并重新生成，还是没有分支**"：
     日志说新建了 b2（写入确实成功了），界面上却永远只有 main（读的是自己的分区）。
     这种事以前完全静默，所以必须在动手写之前把身份定下来。
+
+    实现只有一份（``sessions.bind_callback_uid``）：这里只是保留一个薄的转发，
+    免得"怎么绑定身份"有两套代码各自演化。
     """
-    fixed = storage.bind_session_uid()
-    if fixed is None:
-        return True
-    sessions.note_action(
-        f"⚠ {what}：回调开始时当前用户是 {fixed or '（空）'}，"
-        f"已按浏览器会话修正为 {storage.current_uid()}")
+    sessions.bind_callback_uid(what)
     return True
 
 

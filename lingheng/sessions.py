@@ -308,6 +308,7 @@ def rename_session(session_name: str, new_title: str = None, input_key: str = No
     这个同步**只能**在回调里做，否则会撞上
     StreamlitWidgetAlreadyInstantiatedError。
     """
+    bind_callback_uid("重命名会话")
     if new_title is None:
         new_title = st.session_state.get(input_key, "")
     title = (new_title or "").strip() or store.DEFAULT_SESSION_TITLE
@@ -321,6 +322,7 @@ def rename_session(session_name: str, new_title: str = None, input_key: str = No
 
 def set_pinned(session_name: str, pinned: bool) -> None:
     """置顶 / 取消置顶会话（写入存档的 pinned 字段），同样走回调。"""
+    bind_callback_uid("置顶会话")
     try:
         _update_session_meta(session_name, pinned=bool(pinned))
     except Exception as e:  # noqa: BLE001
@@ -776,6 +778,22 @@ def note_action(text: str) -> None:
     stamp = datetime.datetime.now().strftime("%H:%M:%S")
     RECENT_ACTIONS.append(f"{stamp} [{storage.current_uid()}] {text}")
     del RECENT_ACTIONS[:-12]
+
+
+def bind_callback_uid(what: str) -> None:
+    """回调动手**写存储**之前，先把身份定成"这次浏览器会话的用户"。
+
+    为什么每个写存储的回调都要做一遍：控件回调跑在脚本主体**之前**，而身份是
+    ``ui.main()`` 里设的。回调可能落在"还没跑过本会话脚本"（甚至残留着别的账号
+    用户名）的线程上，于是写入会落进 ``users/local`` 或别人的分区 —— 日志说"改好了"，
+    用户界面上却永远看不到（这正是"编辑留言创建了分支但看不见"的成因）。
+
+    只在**真的修正了身份**时记一条日志：正常情况下身份本来就对，不留噪声。
+    """
+    fixed = storage.bind_session_uid()
+    if fixed is not None:
+        note_action(
+            f"回调：{what} 前把用户身份从 {fixed or '(空)'} 修正为 {storage.current_uid()}")
 
 
 def request_delete_session(session_name: str) -> None:

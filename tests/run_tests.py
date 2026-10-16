@@ -29,13 +29,16 @@ SUITES = ("test_logic.py", "test_smoke.py", "test_row_render.py", "test_branch_u
           "test_package_import.py", "test_delete_flow.py",
           "test_delete_mongo.py", "test_partition_migrate.py", "test_switch_flow.py", "test_draft_gc.py", "test_draft_safety.py", "test_sidebar_layout.py", "test_login_render.py",
           "test_login_e2e.py", "test_reasoning_toggle.py", "test_branch_siblings.py",
-          "test_edit_flow.py", "test_uid_partition.py")
+          "test_edit_flow.py", "test_uid_partition.py", "test_global_state.py")
 
 failures = []
 for index, suite in enumerate(SUITES):
     print(f"===== {suite} =====")
-    # 每个套件一个独立根目录：这样套件内再起子进程也不会清掉本套件的存档
-    env = {**os.environ, "AI_PARTNER_TEST_TMP": str(TESTS_DIR / f".tmp_run{index}")}
+    # 每个套件一个独立根目录：这样套件内再起子进程也不会清掉本套件的存档。
+    # PYTHONIOENCODING 是必须的：Windows 控制台默认 GBK，套件里打印界面原文
+    # （例如「⚙️ 高级配置」）会抛 UnicodeEncodeError，把全绿的断言变成假失败。
+    env = {**os.environ, "AI_PARTNER_TEST_TMP": str(TESTS_DIR / f".tmp_run{index}"),
+           "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(
         [sys.executable, str(TESTS_DIR / suite)],
         cwd=str(TESTS_DIR.parent),

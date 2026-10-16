@@ -88,6 +88,32 @@ streamlit run AI_partner.py
 `AI_PARTNER_DISABLE_AUTH=1` 关掉登录门控（见 [tests/_harness.py](tests/_harness.py)）；
 专门测登录门控的套件会自己把它重新打开。
 
+本地开发想绕过登录（但保留了 `secrets.toml`，例如要连数据库）也可以用它：
+
+```powershell
+$env:AI_PARTNER_DISABLE_AUTH = "1"
+streamlit run AI_partner.py
+```
+
+⚠️ **绝不要在线上设置这个变量**：它一开，登录门控整个消失，所有访客都会落进
+`users/local` 这个共用分区、互相看得见会话。这只是本机调试开关。
+
+### 登录门控是 fail-closed 的
+
+`ALLOWED_USERS` 管的是"能不能用站长的 Key"，登录门控管的是"你是谁"。**读不到凭据表
+不等于没配登录**，这两种情况必须分开处理：
+
+| secrets 的状态 | 判定 | 后果 |
+| --- | --- | --- |
+| 压根没有 secrets 文件 | 本地开发，不做门控 | 直接进（用户名 `local`） |
+| 有 secrets，但**没有** `AUTH_CREDENTIALS` 这一段 | 配了登录但**漏配** | 门控照旧打开，页面上说明缺哪一段 |
+| 有 secrets，但整个文件解析失败（TOML 写错） | 配了登录但**坏了** | 门控照旧打开，页面上显示原始报错 |
+
+第三条是踩出来的：以前写的是 `bool(_credentials_raw())`，于是线上 secrets 一旦读不出来，
+登录门控会**整个消失** —— 任何访客都能进，而且所有人都被当成用户名 `local`，
+**共用同一个 `users/local` 分区、能看到彼此的会话**。这比"打不开"严重得多。
+回归测试：[tests/test_global_state.py](tests/test_global_state.py)。
+
 ### 权限是 fail-closed 的
 
 `ALLOWED_USERS` **留空或写错 = 谁都不能用你的 Key**（而不是谁都能用）。
@@ -118,6 +144,35 @@ users/<用户名>/sessions/drafts/<会话ID>.draft            还没产生对话
 
 对应的防回归测试是 [tests/test_user_isolation.py](tests/test_user_isolation.py)：
 **两种后端各跑一遍**"看不到、读不到、也删不掉别人的会话"，外加路径穿越检查。
+
+### 身份与权限**不许**存进进程级全局
+
+`users/local` 那一类事故的根子是同一个：**把"我是谁"存进了进程共用的地方**。
+Streamlit Community Cloud 上所有用户的脚本跑在**同一个进程**里（只靠线程区分），
+所以模块级全局变量是"所有人共用一份"。审计后逐个改掉的地方：
+
+| 东西 | 以前（进程级全局） | 现在 |
+| --- | --- | --- |
+| 当前用户 | `_state.uid`（`threading.local`，默认 `"local"`） | `set_current_uid()` + `st.session_state["_uid"]` 兜底；回调写存储前用 `bind_session_uid()` 再确认一次 |
+| 模型客户端 | `ai.client` 模块全局 | `st.session_state[ai.CLIENT_STATE]`，按浏览器会话隔离 |
+| 用户填的 Key | — | 只在 `st.session_state`，不落盘、不进日志 |
+| 登录门控 | `bool(_credentials_raw())` | fail-closed（见上一节） |
+| 换账号的内存 | 手工清、容易漏 | `ui.clear_account_state()` + `ui.ACCOUNT_SCOPED_STATE` 清单 |
+
+**为什么模型客户端必须是按会话的**：模块全局是所有会话、所有线程共用。两个人
+（或同一个人的两个标签页）同时用时，后一次 `ui.main()` 的 `configure_client()`
+会把前一个人**正在流式请求**的客户端换掉 —— A 的提问用 B 的 Key 发出去，
+花错人的钱、还记到别人的额度上。`ai.client` 现在只是"不在脚本上下文里"时的兜底
+（工具脚本、测试的老写法仍然可用）。
+
+**为什么回调要自己绑定身份**：控件回调跑在**脚本主体之前**，还可能落在别的线程上
+（线程池会复用线程），此时 `threading.local` 里要么是空的、要么残留着**上一个会话
+甚至是另一个账号**的用户名。于是回调里的写入会落进 `users/local` 或别人的分区 ——
+日志说"改好了"，用户界面上永远看不到。会写存储的回调（重命名、置顶、上传/清除头像、
+重新生成、保存编辑）现在都先调一次 `bind_callback_uid()`。
+
+回归测试：[tests/test_global_state.py](tests/test_global_state.py)（含"日志说改好了、
+其实写到别人分区"这个具体场景）。
 
 ### 为什么接上数据库后变慢了（以及怎么优化）
 
@@ -385,17 +440,26 @@ config → store → profile → sessions → branches → images → ai → ui
 
 ## 测试
 
-五个测试套件都不联网，也不会碰真实的 `sessions/`（它们用 `AI_PARTNER_SESSIONS_DIR`
-把存档目录指到 `tests/.tmp` 下的隔离目录）：
+所有套件都不联网，也不会碰真实的 `sessions/`（它们用 `AI_PARTNER_SESSIONS_DIR`
+把存档目录指到 `tests/.tmp` 下的隔离目录）。平时只需要跑一条命令（**每个套件各起
+一个独立进程**）：
 
 ```bash
-.venv\Scripts\python.exe tests\run_tests.py          # 一次跑完五个套件（各起独立进程）
+.venv\Scripts\python.exe tests\run_tests.py          # 一次跑完全部套件
+.venv\Scripts\python.exe tests\compile_check.py      # 全部源码语法检查（比 import 更严）
+.venv\Scripts\python.exe tests\clean_tmp.py          # 清掉测试临时目录 tests/.tmp
+```
+
+需要单独调试时可以直接跑某一个，例如：
+
+```bash
 .venv\Scripts\python.exe tests\test_logic.py         # 存档 / 分支 / 分叉 / 上下文截断 / 对话流程
 .venv\Scripts\python.exe tests\test_smoke.py         # 页面渲染 / 空会话不建档 / 新建会话高亮
 .venv\Scripts\python.exe tests\test_row_render.py    # 会话条目与「⋯」操作菜单渲染 / 回车重命名
 .venv\Scripts\python.exe tests\test_branch_ui.py     # 侧边栏分支区渲染 / 消息操作入口
 .venv\Scripts\python.exe tests\test_avatar_ui.py     # 对话头像：侧边栏入口 / 气泡头像 / 随会话独立
-.venv\Scripts\python.exe tests\clean_tmp.py          # 清掉测试临时目录 tests/.tmp
+.venv\Scripts\python.exe tests\test_uid_partition.py # 回调里身份丢了/串了也不许写进 users/local
+.venv\Scripts\python.exe tests\test_global_state.py  # 进程级全局状态审计（模型客户端/登录门控/回调身份）
 ```
 
 为什么用 `run_tests.py` 而不是挨个跑：Streamlit 的 `AppTest` 会复用 `sys.modules` 里
@@ -423,6 +487,15 @@ reflog 吊着；远端要 `git push --force-with-lease=<分支>:<推送前远端
 
 > `.gitignore` 里 `sessions/*` + `!sessions/.gitkeep` 保证存档**永远**不入库；
 > 注意 `sessions/*.json` 这种写法挡不住子目录（`branches/`、`attachments/`）。
+
+`tests/migrate_sessions.py` 负责迁移与清理（搬旧存档、清空壳会话、清过期草稿）。
+**连线上数据库时必须显式写 `--uid 你的用户名`**，否则脚本直接拒绝执行 ——
+不加 `--uid` 会默认操作 `users/local`，而那正是"写错分区"事故里那个不属于任何人的分区：
+
+```bash
+.venv\Scripts\python.exe tests/migrate_sessions.py --uid lingheng42 --empty --dry-run
+.venv\Scripts\python.exe tests/migrate_sessions.py --uid lingheng42 --empty --delete
+```
 
 ## 会话存档格式
 

@@ -17,6 +17,15 @@ from . import config, sessions, storage, store
 _AVATAR_CACHE_STATE = "_avatar_bytes_cache"
 
 
+def clear_image_cache() -> None:
+    """丢掉本次浏览器会话缓存过的头像。
+
+    换账号时必须调用：缓存里的字节是上一个账号的图，留着就有机会画给下一个人看
+    （磁盘数据本身是按用户分区的，但缓存不分区）。
+    """
+    st.session_state[_AVATAR_CACHE_STATE] = None
+
+
 def image_suffix(data: bytes) -> str:
     """按文件内容判断图片格式；不认识的格式返回空串（调用方据此拒绝）。"""
     for signature, suffix in config.IMAGE_SIGNATURES:
@@ -125,6 +134,9 @@ def set_avatar(key: str) -> None:
     - `_avatar_uploaded_for` 记下这次上传属于哪个会话，只在当前会话仍是它时才应用
     - `_avatar_applied` 记下已经处理过的文件，重跑时不会把同一张图重复写一次
     """
+    # 先定身份再写：回调可能跑在"没设过 uid"的线程上，否则头像文件会落进
+    # users/local（用户自己永远看不到，还占着别人的分区）
+    sessions.bind_callback_uid("设置对话头像")
     uploaded = st.session_state.get(f"_uploader_{key}")
     if uploaded is None:
         return
@@ -161,6 +173,7 @@ def clear_avatar(key: str) -> None:
     不能给 file_uploader 的控件 key 赋值（Streamlit 视为只读），所以改用
     `_avatar_applied` 记住"这个文件已处理过"，避免它被重复写回来。
     """
+    sessions.bind_callback_uid("清除对话头像")
     st.session_state[key] = None
     st.session_state._avatar_applied = st.session_state.get(f"_uploader_{key}")
     sessions.save_session()

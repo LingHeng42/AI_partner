@@ -270,8 +270,9 @@ def describe(session_name: str = None, branch_id: str = None) -> str:
             lines.append(f"⚠ 磁盘上还有 meta 里没登记的分支文件：{extra}"
                          "（分支建出来了但 meta 里没有：写入可能落到了别的分区，"
                          "或者 meta 随后被覆盖过）")
-        else:
-            lines.append(f"磁盘分支文件：{files}")
+        # 磁盘上到底有哪些分支文件，任何情况下都要摊出来：只报"多出来的"那一支时，
+        # 用户没法确认"我的 main 到底还在不在磁盘上"（而这正是最常被问的一句）。
+        lines.append(f"磁盘分支文件：{files}")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"（分支文件列表读不出来：{type(exc).__name__}: {exc}）")
     return "\n".join(lines)

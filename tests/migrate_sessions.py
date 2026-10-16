@@ -231,7 +231,8 @@ def move_partition(source: str, target: str, delete: bool, dry_run: bool) -> int
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="迁移/清理存档")
-    parser.add_argument("--uid", default=None, help="用户名（默认：local）")
+    parser.add_argument("--uid", default=None,
+                        help="用户名（**线上操作必须显式给**；只有本地自测才可以省略）")
     parser.add_argument("--delete", action="store_true",
                         help="迁移后删除旧副本 / 配合 --empty 真正删除空壳")
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不改动")
@@ -247,6 +248,13 @@ def main() -> int:
     args = parser.parse_args()
 
     uid = args.uid or "local"
+    # 不给 --uid 就默默按 "local" 干活，正是"数据写进 users/local"那一类事故的
+    # 帮凶：你以为在清自己的存档，其实在动一个不属于任何人的分区。连到线上数据库
+    # 时直接拒绝，除非你明确写出 --uid。
+    if not args.uid and storage.backend_kind() == storage.MONGO_BACKEND:
+        print("拒绝执行：连着线上数据库时必须显式给 --uid（例如 --uid lingheng42）。\n"
+              "不加 --uid 会默认操作 users/local —— 那是兜底分区，不是任何人的数据。")
+        return 2
     print(f"当前后端：{storage.backend_kind()} | 目标用户：{uid}")
     if args.from_partition:
         count = move_partition(args.from_partition, uid, args.delete, args.dry_run)

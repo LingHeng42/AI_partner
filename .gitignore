@@ -1,37 +1,45 @@
-# 铏氭嫙鐜 / 缂栬緫鍣?
+# 虚拟环境 / 编辑器
 .venv/
 .idea/
 .vscode/
 __pycache__/
 *.py[cod]
 
-# 鏈湴瀵嗛挜
+# 本地密钥
 .env
 
-# 鐢ㄦ埛瀵硅瘽瀛樻。锛堝睘浜庝釜浜烘暟鎹紝缁濅笉鍏ュ簱锛?
-# 鍙繚鐣欏崰浣嶆枃浠讹細鍘熸潵鍐欑殑鏄?sessions/*.json锛屾敼鎴?涓€涓細璇濅竴涓洰褰?涔嬪悗
-# 瀛愮洰褰曪紙branches/銆乤ttachments/锛夌粫杩囦簡閭ｆ潯瑙勫垯锛岃璇紶杩涗簡浠撳簱
+# 用户对话存档（属于个人数据，绝不入库）
+# 只保留占位文件：原来写的是 "sessions/*.json"，改成"一个会话一个目录"之后
+# 子目录（branches/、attachments/）绕过了那条规则，被误传进了仓库
 sessions/*
 !sessions/.gitkeep
 
-# 娴嬭瘯杩愯鏃剁殑涓存椂鏂囦欢
+# 测试运行时的临时文件
 tests/.tmp/
 ._*.log
 .gitmsg.txt
 
-# 宸ュ叿鎶€鑳藉寘锛堢敱瀹㈡埛绔敓鎴愶級
+# 工具技能包（由客户端生成）
 .agents/
 .claude/
 
-# git 鍘嗗彶鐨勬湰鍦板浠斤紙bundle 閲屽惈鏈夋棫鍘嗗彶锛?
+# git 历史的本地备份（bundle 里含有旧历史）
 *.bundle
 
-# 瀛樻。鍙簲鏀惧湪椤圭洰鏍圭殑 sessions/锛氬寘鍐呰繖涓洰褰曟槸鎷嗗寘鏃?BASE_DIR 绠楅敊鐣欎笅鐨勶紝闃叉鍐嶅嚭鐜?
+# 存档只应放在项目根的 sessions/：包内这个目录是拆包时 BASE_DIR 算错留下的，防止再出现
 lingheng/sessions/
 
-# 鏈湴 secrets锛堝惈 key 涓庣敤鎴疯〃锛岀粷涓嶅叆搴擄級
+# 本地 secrets（含 key 与用户表，绝不入库）
 .streamlit/secrets.toml
 # 测试用的隔离临时根目录（run_tests.py 给每个套件分配一个）
 tests/.tmp_run*
 
 tests/.tmp_msg.txt
+
+# 本地登录配置（含用户名与密码哈希，绝不入库）
+auth_config.yaml
+
+# 跑测试 / 启动探针留下的输出（本地排查用，不入库）
+tests/.run*.txt
+tests/.boot*.txt
+tests/.uid.txt
