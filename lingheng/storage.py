@@ -69,7 +69,63 @@ def set_current_uid(uid: str) -> None:
 
 
 def current_uid() -> str:
-    return getattr(_state, "uid", None) or "local"
+    """当前请求属于哪个用户（storage 的所有路径都挂在这个前缀下面）。
+
+    取值顺序：``set_current_uid`` 记下的值 → ``st.session_state["_uid"]`` → ``"local"``。
+
+    为什么要有第二级兜底（真踩过）：控件回调跑在**脚本主体之前**，而
+    ``set_current_uid`` 是 ``ui.main()`` 里调的。如果这个回调运行在一个还没跑过
+    本会话脚本的线程上，``_state.uid`` 就是空的 —— 于是回调里的写入（例如
+    "编辑消息 → 新建分支"）全部落进 ``users/local/`` 这个不属于任何人的分区：
+
+        日志说"新建了 b2"，界面上却只有 main（数据写到了用户自己看不见的地方）
+
+    宁可多读一次 session_state，也不能把数据写进用户永远看不到的分区。
+    """
+    uid = getattr(_state, "uid", None)
+    if uid:
+        return str(uid)
+    return session_uid() or "local"
+
+
+def session_uid() -> str:
+    """这次浏览器会话属于谁（从 ``st.session_state["_uid"]`` 取，取不到返回 ""）。
+
+    这是"客户端视角"的身份，跟 ``current_uid()``（"这次请求用的身份"）不一定相等：
+    后者优先看线程局部量。两者不一致意味着**写到了别的用户的分区**，排查面板会
+    点名这件事（线程池复用线程时 ``_state.uid`` 可能残留上一个会话的用户名，
+    甚至可能是另一个账号的）。
+    """
+    try:
+        import streamlit as st
+
+        return str(st.session_state.get("_uid") or "").strip()
+    except Exception:  # noqa: BLE001 - 没有脚本上下文（纯脚本、测试替身、后台线程）
+        return ""
+
+
+def bind_session_uid():
+    """在**控件回调**里动手写之前，把当前身份定成"这次浏览器会话的用户"。
+
+    返回值表示"修正了什么"，调用方据此记一条动作日志：
+      · ``None``  —— 身份本来就是对的（正常情况），什么都不用做；
+      · ``""``    —— 原来没有身份（新建的线程），已按会话身份补上；
+      · ``"xxx"`` —— 原来残留着别的用户名（线程池复用线程），已改成会话身份。
+
+    为什么回调必须自己定身份：``set_current_uid`` 是 ``ui.main()`` 里调的，而回调
+    跑在脚本主体**之前**、且可能落在另一个线程上。此时线程局部量要么是空的、要么
+    残留着别的会话（甚至别的账号）的用户名 —— 于是回调里的写入落进
+    ``users/local`` 或别人的分区：日志说"新建了 b2"，界面上永远只有 main。
+    这种事以前**完全静默**（写"成功"、读"成功"，只是读的不是同一份数据）。
+    """
+    uid = session_uid()
+    if not uid:
+        return None
+    previous = getattr(_state, "uid", None)
+    if previous and str(previous) == uid:
+        return None
+    set_current_uid(uid)
+    return str(previous) if previous else ""
 
 
 def _safe(part: str) -> str:

@@ -29,7 +29,7 @@ SUITES = ("test_logic.py", "test_smoke.py", "test_row_render.py", "test_branch_u
           "test_package_import.py", "test_delete_flow.py",
           "test_delete_mongo.py", "test_partition_migrate.py", "test_switch_flow.py", "test_draft_gc.py", "test_draft_safety.py", "test_sidebar_layout.py", "test_login_render.py",
           "test_login_e2e.py", "test_reasoning_toggle.py", "test_branch_siblings.py",
-          "test_edit_flow.py")
+          "test_edit_flow.py", "test_uid_partition.py")
 
 failures = []
 for index, suite in enumerate(SUITES):

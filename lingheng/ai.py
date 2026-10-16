@@ -6,7 +6,7 @@ import sys
 import streamlit as st
 from openai import OpenAI
 
-from . import auth, branches, config, images, profile, sessions, store
+from . import auth, branches, config, images, profile, sessions, storage, store
 
 # 当前使用的模型客户端。由 ui.main() 每次重跑时通过 configure_client() 设置；
 # 测试可以直接替换它（或替换入口模块上的 client，见 _client()）。
@@ -349,6 +349,7 @@ def regenerate(index: int) -> None:
     作为按钮回调执行：只准备新分支与待生成标记，真正的请求交给页面主体
     （回调阶段不适合发起流式请求）。
     """
+    _bind_callback_uid(f"重新生成第 {index} 条")
     sid = st.session_state.get("current_session")
     messages = st.session_state.get("message", [])
     if not sid or not (0 <= index < len(messages)):
@@ -380,6 +381,25 @@ def cancel_edit() -> None:
     st.session_state.editing_index = None
 
 
+def _bind_callback_uid(what: str) -> bool:
+    """回调开始时把当前用户定成"这次浏览器会话的用户"，返回身份是否可用。
+
+    为什么：``set_current_uid`` 是 ``ui.main()`` 里调的，而控件回调跑在脚本主体
+    **之前**、还可能落在另一个线程上。此时线程局部量可能是空的、或残留着别的会话
+    （甚至别的账号）的用户名 —— 于是这里的写入（新建分支）会落进 ``users/local``
+    或别人的分区。表现就是用户反复报的那句"**保存并重新生成，还是没有分支**"：
+    日志说新建了 b2（写入确实成功了），界面上却永远只有 main（读的是自己的分区）。
+    这种事以前完全静默，所以必须在动手写之前把身份定下来。
+    """
+    fixed = storage.bind_session_uid()
+    if fixed is None:
+        return True
+    sessions.note_action(
+        f"⚠ {what}：回调开始时当前用户是 {fixed or '（空）'}，"
+        f"已按浏览器会话修正为 {storage.current_uid()}")
+    return True
+
+
 def submit_edit(index: int, input_key: str) -> None:
     """保存编辑：新建分支（保留原分支），分叉点是"被编辑的这条"。
 
@@ -388,6 +408,7 @@ def submit_edit(index: int, input_key: str) -> None:
     - 编辑 AI 回复  → 新分支里放改写后的 AI 回复，不再额外生成
     这是按钮回调，Streamlit 在回调之后本来就会重跑一次，所以不调用 st.rerun()。
     """
+    _bind_callback_uid(f"编辑第 {index} 条")
     sid = st.session_state.get("current_session")
     messages = st.session_state.get("message", [])
     if not sid or not (0 <= index < len(messages)):

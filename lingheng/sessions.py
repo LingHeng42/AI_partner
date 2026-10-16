@@ -764,11 +764,17 @@ RECENT_ACTIONS = []
 
 
 def note_action(text: str) -> None:
-    """记一条动作日志（只保留最近若干条）。"""
+    """记一条动作日志（只保留最近若干条）。
+
+    每条都带上**当时用的用户分区**（uid）：排查"操作日志说执行了、数据却对不上"
+    时，第一个要看的就是"这次动作用的是哪个用户名"。写到 ``users/local`` 这类
+    不属于任何人的分区时，日志在这里当场露出来（真踩过：回调线程里没设 uid，
+    于是"编辑消息 → 新建分支"全写进了 local，界面上只看得到 main）。
+    """
     import datetime
 
     stamp = datetime.datetime.now().strftime("%H:%M:%S")
-    RECENT_ACTIONS.append(f"{stamp} {text}")
+    RECENT_ACTIONS.append(f"{stamp} [{storage.current_uid()}] {text}")
     del RECENT_ACTIONS[:-12]
 
 

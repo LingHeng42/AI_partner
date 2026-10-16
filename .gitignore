@@ -33,3 +33,5 @@ lingheng/sessions/
 .streamlit/secrets.toml
 # 测试用的隔离临时根目录（run_tests.py 给每个套件分配一个）
 tests/.tmp_run*
+
+tests/.tmp_msg.txt

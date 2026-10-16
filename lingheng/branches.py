@@ -220,6 +220,10 @@ def describe(session_name: str = None, branch_id: str = None) -> str:
     except Exception:  # noqa: BLE001 - 极端情况下没有 session_state
         sid = session_name
     lines.append(f"会话：{sid}")
+    try:
+        lines.append(f"用户分区：{storage.current_uid()}（后端 {storage.backend_kind()}）")
+    except Exception:  # noqa: BLE001
+        pass
     if not sid:
         return "\n".join(lines + ["（还没有会话）"])
     try:
@@ -256,7 +260,31 @@ def describe(session_name: str = None, branch_id: str = None) -> str:
     else:
         lines.append(f"→ 箭头画在第 {index} 条消息下面"
                      + ("（**位置算不出来**，箭头不会渲染）" if index is None else ""))
+    # 磁盘上的分支文件 vs meta 里登记的：对不上就说明"分支其实建出来了，只是
+    # meta 里没有"（写入落到了别的分区，或 meta 随后被覆盖）。光看 meta 是看不见的。
+    try:
+        files = _branch_files(sid)
+        known = [str(b["id"]) for b in items]
+        extra = [name for name in files if name not in known]
+        if extra:
+            lines.append(f"⚠ 磁盘上还有 meta 里没登记的分支文件：{extra}"
+                         "（分支建出来了但 meta 里没有：写入可能落到了别的分区，"
+                         "或者 meta 随后被覆盖过）")
+        else:
+            lines.append(f"磁盘分支文件：{files}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"（分支文件列表读不出来：{type(exc).__name__}: {exc}）")
     return "\n".join(lines)
+
+
+def _branch_files(session_name: str) -> list:
+    """该会话目录下**实际存在**的分支文件名（不含 .json），按名字排序。"""
+    prefix = store.branches_dir(session_name) + "/"
+    out = []
+    for rel in storage.list_files(store.branches_dir(session_name)):
+        if rel.startswith(prefix) and rel.endswith(".json"):
+            out.append(rel[len(prefix):-len(".json")])
+    return sorted(out)
 
 
 def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_index=None,
@@ -283,7 +311,49 @@ def fork_branch(session_name: str, prefix: list, seed=None, parent=None, fork_in
         messages.append(dict(seed))
     sessions.write_branch(session_name, branch_id, {"message": messages})
     sessions.write_session_meta(session_name, meta)
+    _verify_fork(session_name, branch_id)
     return branch_id
+
+
+def _verify_fork(session_name: str, branch_id: str) -> None:
+    """新建分支后**回读校验**：读不回来就当场喊出来。
+
+    为什么必须校验：这条分支没被读回来只有两种可能，而两种以前都是**完全静默**的：
+
+    1. 写入落在了别的用户分区（典型：控件回调跑在一个还没设 uid 的线程上，
+       ``_state.uid`` 是空的 → 全部写进 ``users/local/``）。
+       用户看到的是"点了编辑/重新生成，界面一点变化都没有"，日志却说新建成功了；
+    2. meta 紧接着被另一处写入覆盖掉了。
+
+    两种情况用户都不可能自己查出来（一边写、一边读，各自都"成功"），所以宁可
+    在界面上明说 + 把当前分区写进日志，也不要让它继续静默下去。
+    """
+    try:
+        ids = sessions.branch_ids(session_name)
+    except Exception as exc:  # noqa: BLE001 - 校验本身失败不该影响主流程
+        sessions.note_action(
+            f"⚠ 校验新建 {branch_id} 时出错：{type(exc).__name__}: {exc}")
+        return
+    # 先看"身份"对不对：线程局部量里的用户名跟这次浏览器会话的用户名不一致，
+    # 说明这次写入用错了分区（线程池复用线程时会残留上一个会话的用户名，
+    # 极端情况下是**另一个账号**的）。这种情况回读能过（读的也是那个错分区），
+    # 光靠下面的回读检查抓不住，必须单独点名。
+    uid, owner = storage.current_uid(), storage.session_uid()
+    if owner and owner != uid:
+        sessions.note_action(
+            f"⚠ 写 {branch_id} 用的是分区 {uid}，但这次浏览器会话属于 {owner}")
+        st.error(
+            f"数据写错了分区：这次写入用的是「{uid}」，而当前登录用户是「{owner}」。\n\n"
+            "请把「⚙️ 高级配置 → 排查：最近动作」与「存储」两块的内容发给开发者。")
+        return
+    if branch_id in ids:
+        return
+    sessions.note_action(
+        f"⚠ 新建 {branch_id} 后回读不到它（分区 {uid}／现有分支 {ids}）")
+    st.error(
+        f"新建分支 {branch_id} 之后回读校验失败（当前用户分区：{uid}）。\n\n"
+        "数据可能写进了别的分区，请把「⚙️ 高级配置 → 排查：最近动作」里的内容"
+        "发给开发者。")
 
 
 def switch_branch(session_name: str, branch_id: str) -> None:
