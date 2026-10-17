@@ -565,28 +565,33 @@ def _render_message_actions(branch: str, index: int, last: int, siblings: list,
 
     **必须由"历史回放"和"刚刚生成完的那轮"共用。** 以前只有历史回放里画这些，
     于是刚发完消息时最新一轮没有 ⋯ —— 要等下一次重跑（比如切一次会话）才补上。
+
+    ⋯ 与切换箭头放在**同一个横向容器**里（一行）：以前 ⋯ 一行、箭头另起一行
+    （还占满整行宽度），每轮消息都要多占一份竖向空间，看着像两组不相干的控件。
+    横向容器里子元素按内容宽度排列，所以这里不用再套 st.columns。
     """
-    with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
-                    help="编辑这条消息；最后一条回答还能重新生成"):
-        if index == last and st.session_state.message[index].get("role") == "assistant":
+    with st.container(horizontal=True, vertical_alignment="center"):
+        with st.popover("⋯", key=f"msg_menu_{branch}_{index}",
+                        help="编辑这条消息；最后一条回答还能重新生成"):
+            if index == last and st.session_state.message[index].get("role") == "assistant":
+                st.button(
+                    "重新生成",
+                    key=f"regen_{branch}_{index}",
+                    width="stretch",
+                    icon=":material/refresh:",
+                    on_click=regenerate,
+                    args=(index,),
+                )
             st.button(
-                "重新生成",
-                key=f"regen_{branch}_{index}",
+                "编辑这条",
+                key=f"edit_{branch}_{index}",
                 width="stretch",
-                icon=":material/refresh:",
-                on_click=regenerate,
+                icon=":material/edit:",
+                on_click=start_edit,
                 args=(index,),
             )
-        st.button(
-            "编辑这条",
-            key=f"edit_{branch}_{index}",
-            width="stretch",
-            icon=":material/edit:",
-            on_click=start_edit,
-            args=(index,),
-        )
-    if index == forked_at:
-        _render_branch_arrows(branch, index, siblings)
+        if index == forked_at:
+            _render_branch_arrows(branch, index, siblings)
 
 
 def _render_branch_arrows(branch: str, index: int, siblings: list) -> None:
@@ -598,31 +603,31 @@ def _render_branch_arrows(branch: str, index: int, siblings: list) -> None:
 
     只有**分叉点那一条消息**下面才画（forked_at）。以前是每条消息都画，
     等于说"后面每一轮也各自分了叉"，既误导又更容易撞控件 key。
+
+    不自己开一行：调用方已经把它放进横向容器，和 ⋯ 排在同一行（以前这里用
+    ``st.columns([1, 2, 1])`` 独占一整行，箭头会被撑到消息两端的对角上）。
+    这里按「‹ 2/3 ›」的阅读顺序直接摆三个子元素，宽度由内容决定。
     """
     if len(siblings) <= 1:
         return
     position = siblings.index(branch) if branch in siblings else 0
     prev_branch = siblings[(position - 1) % len(siblings)]
     next_branch = siblings[(position + 1) % len(siblings)]
-    nav = st.columns([1, 2, 1], vertical_alignment="center")
-    with nav[0]:
-        st.button(
-            "", key=f"branch_prev_{branch}_{index}",
-            icon=":material/chevron_left:",
-            help=f"切到 {prev_branch}",
-            on_click=sessions.request_switch_branch,
-            args=(st.session_state.current_session, prev_branch),
-        )
-    with nav[1]:
-        st.caption(f"分支 {position + 1}/{len(siblings)}")
-    with nav[2]:
-        st.button(
-            "", key=f"branch_next_{branch}_{index}",
-            icon=":material/chevron_right:",
-            help=f"切到 {next_branch}",
-            on_click=sessions.request_switch_branch,
-            args=(st.session_state.current_session, next_branch),
-        )
+    st.button(
+        "", key=f"branch_prev_{branch}_{index}",
+        icon=":material/chevron_left:",
+        help=f"切到 {prev_branch}",
+        on_click=sessions.request_switch_branch,
+        args=(st.session_state.current_session, prev_branch),
+    )
+    st.caption(f"分支 {position + 1}/{len(siblings)}", width="content")
+    st.button(
+        "", key=f"branch_next_{branch}_{index}",
+        icon=":material/chevron_right:",
+        help=f"切到 {next_branch}",
+        on_click=sessions.request_switch_branch,
+        args=(st.session_state.current_session, next_branch),
+    )
 
 
 def format_reasoning_html(text: str, streaming: bool = False) -> str:
